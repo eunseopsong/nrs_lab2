@@ -2,6 +2,7 @@
 from __future__ import annotations
 from collections.abc import Sequence
 from typing import Tuple
+import math
 import torch
 
 import isaaclab.sim as sim_utils
@@ -13,7 +14,8 @@ from .nrs_ur10e_direct_env_cfg import NrsUR10eDirectEnvCfg
 
 
 class NrsUR10eDirectEnv(DirectRLEnv):
-    """UR10e + Spindle(TCP 오프셋) 환경: 두 목표점을 번갈아 방문하며, TCP를 수평(-Z)로 유지.
+    """UR10e + Spindle(TCP 오프셋) 환경: 두 목표점을 번갈아 방문.
+       Orientation 보상: roll≈roll_target, pitch≈pitch_target, yaw는 자유.
 
     - Actions: Δq (rad), [-1,1] → action_scale 배 → position target 적층
     - Observations: [q(6), dq(6)]
@@ -22,7 +24,7 @@ class NrsUR10eDirectEnv(DirectRLEnv):
         * 근접 보너스 (bonus_reach)
         * 페이즈 전환 보너스 (bonus_phase)
         * 페이즈 정체 패널티 (phase_step_penalty * phase_step)
-        * 자세 보상: TCP z축이 월드 -Z에 정렬되도록 (w_ori)
+        * 자세 보상: (roll - roll_target)^2, (pitch - pitch_target)^2  (yaw 미사용)
         * 속도/액션 패널티 (w_dq, w_act), (옵션) 홈포즈 유지 (w_home)
     - Dones: timeout only
     """
@@ -89,13 +91,15 @@ class NrsUR10eDirectEnv(DirectRLEnv):
 
         # --- TCP offset (in EE local frame) ---
         if self.cfg.tcp_offset is None:
-            self.tcp_offset = torch.tensor([0.0, 0.0, 0.185], device=self.device, dtype=self.q.dtype)
+            self.tcp_offset = torch.tensor([0.0, 0.0, -0.085], device=self.device, dtype=self.q.dtype)
         else:
             self.tcp_offset = torch.tensor(self.cfg.tcp_offset, device=self.device, dtype=self.q.dtype)
 
-        # --- Orientation target (world) ---
-        self._z_local = torch.tensor([0.0, 0.0, 1.0], device=self.device, dtype=self.q.dtype)     # EE 로컬 z축
-        self._z_world_target = torch.tensor([0.0, 0.0, -1.0], device=self.device, dtype=self.q.dtype)  # 월드 -Z
+        # --- Orientation targets (roll, pitch). yaw는 자유 ---
+        self.roll_target = float(getattr(self.cfg, "roll_target", 3.1))
+        self.pitch_target = float(getattr(self.cfg, "pitch_target", 0.0))
+        self.w_roll = float(getattr(self.cfg, "w_roll", 6.0))
+        self.w_pitch = float(getattr(self.cfg, "w_pitch", 4.0))
 
         # --- Phase buffers ---
         self._phase = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)  # 0->A, 1->B
@@ -107,7 +111,6 @@ class NrsUR10eDirectEnv(DirectRLEnv):
         self.hold_steps = self.cfg.hold_steps
         self.max_phase_steps = self.cfg.max_phase_steps
         self.w_pos = self.cfg.w_pos
-        self.w_ori = self.cfg.w_ori
         self.w_dq  = self.cfg.w_dq
         self.w_act = self.cfg.w_act
         self.bonus_reach = self.cfg.bonus_reach
@@ -158,16 +161,22 @@ class NrsUR10eDirectEnv(DirectRLEnv):
         pos_err_sq = torch.sum(pos_err * pos_err, dim=-1)  # (N,)
         near = pos_err_sq <= (self.reach_tol * self.reach_tol)
 
-        # 4) 자세 오차: TCP z축(로컬 [0,0,1])을 월드 -Z로 정렬
-        z_axis = self._quat_rotate_xyzw(tcp_quat, self._z_local)       # (N,3)
-        cos_val = torch.sum(z_axis * self._z_world_target, dim=-1).clamp(-1.0, 1.0)
-        ori_err = 1.0 - cos_val  # 0이면 완벽 정렬
+        # 4) RPY 추출 (쿼터니언 xyzw → roll, pitch, yaw)
+        rpy = self._quat_to_rpy(tcp_quat)  # (N,3) [roll, pitch, yaw]
+        roll  = rpy[:, 0]
+        pitch = rpy[:, 1]
+
+        # 각도 차이는 [-pi, pi]로 정규화해서 제곱 패널티
+        roll_err  = self._wrap_to_pi(roll  - self.roll_target)
+        # pitch는 asin 범위가 [-pi/2, pi/2]라 wrap이 필요 없지만, 안전하게 통일
+        pitch_err = self._wrap_to_pi(pitch - self.pitch_target)
 
         # 5) 기본 보상
         rew = -self.w_pos * pos_err_sq \
-              - self.w_ori * ori_err \
-              - self.w_dq  * torch.sum(self.dq[:, self._jid] * self.dq[:, self._jid], dim=-1) \
-              - self.w_act * torch.sum(self.actions * self.actions, dim=-1)
+              - self.w_roll  * (roll_err  * roll_err) \
+              - self.w_pitch * (pitch_err * pitch_err) \
+              - self.w_dq    * torch.sum(self.dq[:, self._jid] * self.dq[:, self._jid], dim=-1) \
+              - self.w_act   * torch.sum(self.actions * self.actions, dim=-1)
 
         if self.enable_home_keep:
             err_q = self.q[:, self._jid] - self.q_ref
@@ -256,6 +265,37 @@ class NrsUR10eDirectEnv(DirectRLEnv):
         t = 2.0 * torch.cross(q_xyz, v, dim=1)
         v_rot = v + q_w * t + torch.cross(q_xyz, t, dim=1)
         return v_rot
+
+    @staticmethod
+    def _wrap_to_pi(angle: torch.Tensor) -> torch.Tensor:
+        """각도를 [-pi, pi] 범위로 래핑."""
+        return torch.remainder(angle + math.pi, 2 * math.pi) - math.pi
+
+    @staticmethod
+    def _quat_to_rpy(q_xyzw: torch.Tensor) -> torch.Tensor:
+        """쿼터니언(xyzw) → RPY(rad). 배치 지원."""
+        x = q_xyzw[:, 0]
+        y = q_xyzw[:, 1]
+        z = q_xyzw[:, 2]
+        w = q_xyzw[:, 3]
+
+        # roll
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        roll = torch.atan2(sinr_cosp, cosr_cosp)
+
+        # pitch
+        sinp = 2.0 * (w * y - z * x)
+        pitch = torch.where(torch.abs(sinp) >= 1.0,
+                            torch.sign(sinp) * (math.pi / 2.0),
+                            torch.asin(sinp))
+
+        # yaw (자유지만 변환은 반환)
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = torch.atan2(siny_cosp, cosy_cosp)
+
+        return torch.stack((roll, pitch, yaw), dim=-1)
 
     def _update_phase(self, near: torch.Tensor) -> torch.Tensor:
         """목표 근접 연속성/최대 지속시간을 기준으로 A<->B 페이즈 토글.
