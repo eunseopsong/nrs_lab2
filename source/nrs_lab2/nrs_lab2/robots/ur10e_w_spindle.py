@@ -23,9 +23,11 @@ from isaaclab.assets.articulation import ArticulationCfg
 # -----------------------------------------------------------------------------
 # User paths and prims
 # -----------------------------------------------------------------------------
-UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_concave_surface.usd"
+# UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_concave_surface.usd"
+UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_w_spindle.usd"
 # UR10E_PRIM_PATH = "/World/ur10e_w_spindle_robot"   # as in your USD
 EE_FRAME_NAME = "wrist_3_link"                      # end-effector frame in your USD
+
 
 # -----------------------------------------------------------------------------
 # Home pose (rad)

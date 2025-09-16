@@ -46,7 +46,8 @@ class NrsUR10eDirectEnvCfg(DirectRLEnvCfg):
 
     # ===== Robot =====
     robot_cfg: ArticulationCfg = UR10E_W_SPINDLE_HIGH_PD_CFG.replace(
-        prim_path="/World/ur10e_w_spindle_robot",  # 단일 env 기준
+        # prim_path="/World/ur10e_w_spindle_robot",  # 단일 env 기준
+        prim_path="/World/Robot",  # 단일 env 기준
     )
 
     # ===== Scene =====
