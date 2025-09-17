@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 from __future__ import annotations
-from typing import Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 import torch
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState  # target joint q1~q6 퍼블리시한다고 가정
 
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
@@ -9,83 +12,71 @@ from isaaclab.utils.math import (
     combine_frame_transforms,
     quat_error_magnitude,
     quat_mul,
+    quat_inv,
 )
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-# --------------------------------------------------------------------------------------
-# A) 명령(커맨드) 기반 리워드 — 관측 파이프라인 호환 목적 (필요시 그대로 사용)
-# --------------------------------------------------------------------------------------
-def position_command_error(env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: RigidObject = env.scene[asset_cfg.name]
-    cmd = env.command_manager.get_command(command_name)
-    des_pos_b = cmd[:, :3]
-    des_pos_w, _ = combine_frame_transforms(asset.data.root_pos_w, asset.data.root_quat_w, des_pos_b)
-    curr_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
-    return torch.norm(curr_pos_w - des_pos_w, dim=1)
+# ============================================================
+# ROS2 Subscriber Node (target joints q1~q6)
+# ============================================================
+class TargetJointSubscriber(Node):
+    def __init__(self):
+        super().__init__("target_joint_subscriber")
+        self.target_joints = torch.zeros(6, dtype=torch.float32)
+        self.sub = self.create_subscription(
+            JointState,
+            "/target_joints",  # C++ node에서 퍼블리시하는 토픽 이름
+            self.joint_callback,
+            10,
+        )
 
-def position_command_error_tanh(env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: RigidObject = env.scene[asset_cfg.name]
-    cmd = env.command_manager.get_command(command_name)
-    des_pos_b = cmd[:, :3]
-    des_pos_w, _ = combine_frame_transforms(asset.data.root_pos_w, asset.data.root_quat_w, des_pos_b)
-    curr_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
-    dist = torch.norm(curr_pos_w - des_pos_w, dim=1)
-    return 1.0 - torch.tanh(dist / std)
-
-def orientation_command_error(env: ManagerBasedRLEnv, command_name: str, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: RigidObject = env.scene[asset_cfg.name]
-    cmd = env.command_manager.get_command(command_name)
-    des_quat_b = cmd[:, 3:7]
-    des_quat_w = quat_mul(asset.data.root_quat_w, des_quat_b)
-    curr_quat_w = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
-    return quat_error_magnitude(curr_quat_w, des_quat_w)
+    def joint_callback(self, msg: JointState):
+        # msg.position = [q1, q2, q3, q4, q5, q6]
+        if len(msg.position) >= 6:
+            self.target_joints = torch.tensor(msg.position[:6], dtype=torch.float32)
 
 
-# --------------------------------------------------------------------------------------
-# B) 고정 타깃 포즈 리워드 — (x,y,z,r,p,y) 유지
-# --------------------------------------------------------------------------------------
-def _target_pos(env: ManagerBasedRLEnv, xyz: Tuple[float, float, float]) -> torch.Tensor:
-    return torch.tensor(xyz, device=env.device).unsqueeze(0).repeat(env.num_envs, 1)
+# ============================================================
+# ROS2 초기화 및 글로벌 subscriber 객체
+# ============================================================
+rclpy.init(args=None)
+_target_joint_node = TargetJointSubscriber()
 
-def _target_quat(env: ManagerBasedRLEnv, wxyz: Tuple[float, float, float, float]) -> torch.Tensor:
-    return torch.tensor(wxyz, device=env.device).unsqueeze(0).repeat(env.num_envs, 1)
 
-def position_fixed_error(env: ManagerBasedRLEnv, target_pos_xyz: Tuple[float, float, float], asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: RigidObject = env.scene[asset_cfg.name]
-    p = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
-    p_t = _target_pos(env, target_pos_xyz)
-    return torch.norm(p - p_t, dim=1)
+def _update_ros2_once():
+    """Spin ROS2 node non-blocking (한번씩만 돌려주기)."""
+    rclpy.spin_once(_target_joint_node, timeout_sec=0.0)
 
-def position_fixed_tanh(env: ManagerBasedRLEnv, std: float, target_pos_xyz: Tuple[float, float, float], asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: RigidObject = env.scene[asset_cfg.name]
-    p = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
-    p_t = _target_pos(env, target_pos_xyz)
-    d = torch.norm(p - p_t, dim=1)
-    return 1.0 - torch.tanh(d / std)
 
-def orientation_fixed_error(env: ManagerBasedRLEnv, target_quat_wxyz: Tuple[float, float, float, float], asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    asset: RigidObject = env.scene[asset_cfg.name]
-    q = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
-    q_t = _target_quat(env, target_quat_wxyz)
-    return quat_error_magnitude(q, q_t)
+# ============================================================
+# Reward Functions
+# ============================================================
+def joint_position_error(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """
+    현재 로봇 조인트 상태(q1~q6)와 ROS2에서 받은 target joint 상태 차이 계산.
+    """
+    _update_ros2_once()  # 최신 값 갱신
 
-def small_error_bonus_fixed(
-    env: ManagerBasedRLEnv,
-    pos_tol: float,
-    ang_tol: float,
-    target_pos_xyz: Tuple[float, float, float],
-    target_quat_wxyz: Tuple[float, float, float, float],
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    asset: RigidObject = env.scene[asset_cfg.name]
-    p = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
-    q = asset.data.body_quat_w[:, asset_cfg.body_ids[0]]
-    p_t = _target_pos(env, target_pos_xyz)
-    q_t = _target_quat(env, target_quat_wxyz)
-    pos_err = torch.norm(p - p_t, dim=1)
-    ang_err = quat_error_magnitude(q, q_t)
-    ok = (pos_err < pos_tol) & (ang_err < ang_tol)
-    return ok.float()
+    # 현재 로봇 조인트 값 (batch x 6)
+    cur_q = env.scene[asset_cfg.name].data.joint_pos[:, asset_cfg.joint_ids, 0]
+
+    # target joints (6,)
+    target_q = _target_joint_node.target_joints.to(cur_q.device)
+
+    # shape 맞춰주기 (batch x 6)
+    target_q = target_q.unsqueeze(0).repeat(cur_q.shape[0], 1)
+
+    # L2 norm error
+    error = torch.norm(cur_q - target_q, dim=-1)
+    return error
+
+
+def joint_position_tanh_reward(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, std: float = 0.1) -> torch.Tensor:
+    """
+    조인트 위치 오차 기반 tanh-shaped reward.
+    """
+    error = joint_position_error(env, asset_cfg)
+    return torch.tanh(-error / std)

@@ -3,7 +3,7 @@
 
 """Configuration for UR10e with a spindle tool (local USD scene).
 
-- Loads the local USD: /home/eunseop/isaac/isaac_save/ur10e_concave_surface.usd
+- Loads the local USD: /home/eunseop/isaac/isaac_save/ur10e_w_spindle.usd
 - Spawns only the articulation prim: /World/ur10e_w_spindle_robot
 - EE (tool) frame: wrist_3_link
 - Two variants: default PD and HIGH_PD (task-space / diff-IK friendly)
@@ -23,22 +23,18 @@ from isaaclab.assets.articulation import ArticulationCfg
 # -----------------------------------------------------------------------------
 # User paths and prims
 # -----------------------------------------------------------------------------
-# UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_concave_surface.usd"
 UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_w_spindle.usd"
-# UR10E_PRIM_PATH = "/World/ur10e_w_spindle_robot"   # as in your USD
-EE_FRAME_NAME = "wrist_3_link"                      # end-effector frame in your USD
+EE_FRAME_NAME = "wrist_3_link"        # end-effector frame in your USD
+
+# TCP offset (spindle tool 길이 반영: wrist_3_link → tool tip)
+# TCP_OFFSET = (0.0, 0.0, 0.185)        # [m], 필요 시 -Z 방향이면 (0.0, 0.0, -0.185)
+TCP_OFFSET = (0.0, 0.0, -0.185)        # [m], 필요 시 -Z 방향이면 (0.0, 0.0, -0.185)
 
 
 # -----------------------------------------------------------------------------
 # Home pose (rad)
 # -----------------------------------------------------------------------------
 UR10E_HOME_DICT = {
-    # "shoulder_pan_joint": 3.14159265359,
-    # "shoulder_lift_joint": -1.57079632679,
-    # "elbow_joint": -1.57079632679,
-    # "wrist_1_joint": -1.57079632679,
-    # "wrist_2_joint": 1.57079632679,
-    # "wrist_3_joint": 0.0,
     "shoulder_pan_joint": 0.0,
     "shoulder_lift_joint": -1.57079632679,
     "elbow_joint": -1.57079632679,
@@ -63,7 +59,6 @@ UR10E_ARM_JOINTS = [
 UR10E_W_SPINDLE_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=UR10E_USD_PATH,
-        # prim_path=UR10E_PRIM_PATH,  # import only this prim as an articulation
         activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -74,20 +69,17 @@ UR10E_W_SPINDLE_CFG = ArticulationCfg(
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=0,
         ),
-        # If collisions feel too "thick", uncomment and tune:
         # collision_props=sim_utils.CollisionPropertiesCfg(
         #     contact_offset=0.005, rest_offset=0.0
         # ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos=UR10E_HOME_DICT,
-        # Optionally set base pose (if USD doesn't already place it):
-        # pos=(0.0, 0.0, 0.0), rot=(0.0, 0.0, 0.0, 1.0)
+        # pos=(0.0, 0.0, 0.0), rot=(0.0, 0.0, 0.0, 1.0),
     ),
     actuators={
         "ur10e_arm": ImplicitActuatorCfg(
             joint_names_expr=UR10E_ARM_JOINTS,
-            # Conservative effort; adjust if your USD defines different limits
             effort_limit_sim=150.0,
             stiffness=120.0,
             damping=8.0,
@@ -96,8 +88,9 @@ UR10E_W_SPINDLE_CFG = ArticulationCfg(
     soft_joint_pos_limit_factor=1.0,
 )
 
-# Expose EE frame name for downstream controllers / tasks
+# Expose EE frame name and TCP offset for downstream controllers / tasks
 UR10E_W_SPINDLE_CFG.ee_frame_name = EE_FRAME_NAME
+UR10E_W_SPINDLE_CFG.tcp_offset = TCP_OFFSET
 
 # -----------------------------------------------------------------------------
 # High-PD variant (helpful for task-space/diff-IK style control)
@@ -107,11 +100,14 @@ UR10E_W_SPINDLE_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = True
 UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].stiffness = 400.0
 UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].damping = 60.0
 UR10E_W_SPINDLE_HIGH_PD_CFG.ee_frame_name = EE_FRAME_NAME
+UR10E_W_SPINDLE_HIGH_PD_CFG.tcp_offset = TCP_OFFSET
 
-# Optional explicit exports
+# -----------------------------------------------------------------------------
+# Exports
+# -----------------------------------------------------------------------------
 __all__ = [
     "UR10E_W_SPINDLE_CFG",
     "UR10E_W_SPINDLE_HIGH_PD_CFG",
     "EE_FRAME_NAME",
+    "TCP_OFFSET",
 ]
-
