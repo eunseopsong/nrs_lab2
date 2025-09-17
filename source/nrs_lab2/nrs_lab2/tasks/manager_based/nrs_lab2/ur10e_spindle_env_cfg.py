@@ -40,7 +40,7 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     ground = AssetBaseCfg(
         prim_path="/World/ground",
         spawn=sim_utils.GroundPlaneCfg(),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
     )
     # 로봇(아래 EnvCfg에서 주입)
     robot: AssetBaseCfg = MISSING
