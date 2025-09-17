@@ -23,3 +23,16 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
+
+gym.register(
+    id="Nrs-UR10e-Manager-v1",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "nrs_lab2.tasks.manager_based.nrs_lab2.config.ur10e_spindle.polishing_env_cfg:PolishingPoseHoldEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
+        # ⬇️ 여기 두 줄에서 콜론(:)으로 고치기!
+        "skrl_amp_cfg_entry_point": f"{agents.__name__}:skrl_amp_cfg.yaml",
+        "skrl_cfg_entry_point":     f"{agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)
