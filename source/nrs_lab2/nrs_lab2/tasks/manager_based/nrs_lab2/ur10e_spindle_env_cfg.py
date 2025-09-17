@@ -34,7 +34,7 @@ from nrs_lab2.nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
 # ---------- Scene ----------
 @configclass
 class SpindleSceneCfg(InteractiveSceneCfg):
-    """Ground + Robot"""
+    """Ground + Robot + Workpiece"""
     ground = AssetBaseCfg(
         prim_path="/World/ground",
         spawn=sim_utils.GroundPlaneCfg(),
@@ -44,6 +44,18 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=2500.0),
+    )
+
+    # workpiece (concave surface)
+    workpiece = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Workpiece",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/eunseop/isaac/isaac_save/concave_surface.usd",
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
     )
 
 
@@ -103,7 +115,7 @@ class TerminationsCfg:
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     """UR10e(+spindle) target joint 추종 환경"""
 
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=4096, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1024, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
