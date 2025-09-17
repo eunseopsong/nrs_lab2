@@ -39,7 +39,7 @@ class PolishingPoseHoldEnvCfg(UR10eSpindleEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # (1) 타깃 포즈 주입
+        # (1) 타깃 포즈 주입 (리워드 terms만 사용)
         self.rewards.position_fixed.params["target_pos_xyz"] = TARGET_POS_XYZ
         self.rewards.position_fixed_tanh.params["target_pos_xyz"] = TARGET_POS_XYZ
         self.rewards.orientation_fixed.params["target_quat_wxyz"] = TARGET_QUAT_WXYZ
