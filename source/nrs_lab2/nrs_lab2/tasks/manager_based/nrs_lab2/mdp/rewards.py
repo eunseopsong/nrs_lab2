@@ -36,17 +36,22 @@ def get_hdf5_target(t: int) -> torch.Tensor:
 def joint_target_error(env: ManagerBasedRLEnv) -> torch.Tensor:
     """MSE 기반: target joints 와 현재 joints 차이"""
     q = env.scene["robot"].data.joint_pos
+    T = _hdf5_trajectory.shape[0]
+    idx = min(env.common_step_counter, T - 1)
     target = get_hdf5_target(env.common_step_counter).unsqueeze(0).repeat(env.num_envs, 1)
     error = torch.mean((q - target) ** 2, dim=-1)
 
     # ✅ 디버그 출력 (env 0만)
-    if env.common_step_counter % 100 == 0:  # 매 100 step마다 출력 (너무 많지 않게)
-        print(f"[Step {env.common_step_counter}] "
+    if env.common_step_counter % 100 == 0:  # 매 100 step마다 출력
+        current_time = env.common_step_counter * env.step_dt
+        print(f"[Step {env.common_step_counter} | Time {current_time:.2f}s | HDF5 idx {idx}] "
               f"Target[0]: {target[0].cpu().numpy()} "
               f"Current[0]: {q[0].cpu().numpy()} "
               f"Error[0]: {error[0].item():.6f}")
 
     return error
+
+
 
 
 def joint_target_tanh(env: ManagerBasedRLEnv) -> torch.Tensor:
