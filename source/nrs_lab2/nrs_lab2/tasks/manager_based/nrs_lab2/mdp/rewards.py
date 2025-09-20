@@ -25,14 +25,17 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
     if _hdf5_trajectory is None:
         raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
 
-    T = _hdf5_trajectory.shape[0]              # HDF5 길이
-    E = env.max_episode_length                 # episode step 수 (예: 3600)
-    step = env.common_step_counter
+    T = _hdf5_trajectory.shape[0]      # HDF5 길이
+    E = env.max_episode_length         # episode step 수 (예: 3600)
+
+    # episode 내부 step counter 사용 (reset 시 0으로 돌아감)
+    step = env.episode_length_buf[0].item()
 
     # 🔑 HDF5 인덱스를 episode 진행도에 맞춰 스케일링
     idx = min(int(step / E * T), T - 1)
 
     return _hdf5_trajectory[idx]
+
 
 
 
