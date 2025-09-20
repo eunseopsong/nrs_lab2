@@ -19,6 +19,8 @@ GOAL_JOINTS = torch.tensor(
     dtype=torch.float32,
 )
 
+
+
 def _get_robot_joint_pos(env: ManagerBasedRLEnv) -> torch.Tensor:
     """현재 로봇 조인트 각도 [num_envs, dof]"""
     robot = env.scene["robot"]  # Articulation
