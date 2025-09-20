@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-UR10e + Spindle (manager-based): target joint 값 추종 환경
-- End-effector 포즈 기반 리워드 제거
-- 조인트 값 기반 리워드만 유지
-- Scene 요소 (ground, robot, light, workpiece) 포함
+UR10e + Spindle (manager-based): target joint 값 추종 환경 (V7)
+- Termination 조건: 시간 기반 (20초)
+- Rewards: joint tracking + velocity penalty + action smoothness penalty
 """
 
 from __future__ import annotations
@@ -106,20 +105,18 @@ class RewardsCfg:
     )
     joint_velocity_penalty = RewTerm(
         func=local_rewards.joint_velocity_penalty,
-        weight=-0.05,   # 속도 제약 (값은 상황 따라 조정)
+        weight=-0.05,
     )
     action_smoothness_penalty = RewTerm(
         func=local_rewards.action_smoothness_penalty,
-        weight=-0.05,   # 급격한 액션 변화 억제
+        weight=-0.05,
     )
-
 
 
 # ---------- Terminations ----------
 @configclass
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    reached_end = DoneTerm(func=local_rewards.reached_end)
 
 
 # ---------- EnvCfg ----------
@@ -127,7 +124,7 @@ class TerminationsCfg:
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     """UR10e(+spindle) target joint 추종 환경"""
 
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=256, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=512, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
@@ -137,7 +134,7 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 12.0
+        self.episode_length_s = 20.0  # 20초 limit
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 60.0
 
