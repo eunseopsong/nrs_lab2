@@ -1,63 +1,42 @@
 # SPDX-License-Identifier: BSD-3-Clause
 from __future__ import annotations
-import math
-from typing import TYPE_CHECKING
 import torch
+import h5py
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-# -------------------------------
-# V2: 왕복하는 joint target (start <-> goal)
-# -------------------------------
-START_JOINTS = torch.tensor(
-    [0.0, -0.785, -0.785, -1.57, 1.57, 0.0],  # 시작 포즈
-    dtype=torch.float32,
-)
-GOAL_JOINTS = torch.tensor(
-    [0.0, -1.57, -1.57, -1.57, 1.57, 0.0],  # 끝 포즈
-    dtype=torch.float32,
-)
+_hdf5_trajectory = None
 
 
-
-def _get_robot_joint_pos(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """현재 로봇 조인트 각도 [num_envs, dof]"""
-    robot = env.scene["robot"]  # Articulation
-    return robot.data.joint_pos  # [N, D]
-
-def _moving_target(env, num_joints: int):
-    """주기적으로 start~goal joint를 왕복"""
-    t = torch.tensor(env.common_step_counter, device=env.device, dtype=torch.float32)  # [scalar]
-    episode_length = torch.tensor(env.max_episode_length, device=env.device, dtype=torch.float32)
-
-    # start ~ goal 정의
-    start = torch.tensor([0.0, 0.0, 0.0, -1.57, 1.57, 0.0], device=env.device)
-    goal  = torch.tensor([0.0, -1.57, -1.57, -1.57, 1.57, 0.0], device=env.device)
-
-    # 주기 (한 episode에서 몇 번 왕복할지)
-    num_cycles = 2.0   # 2번 왕복
-    omega = 2 * math.pi * num_cycles / episode_length
-
-    # sin 기반 주기적 타겟
-    alpha = 0.5 * (1.0 + torch.sin(omega * t))  # [0,1] 사이에서 왕복
-    target = start + (goal - start) * alpha
-
-    return target.unsqueeze(0).repeat(env.num_envs, 1)  # [N, D]
+def load_hdf5_trajectory(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "joint_positions"):
+    """HDF5 trajectory 데이터를 로드 (reset 시 1회 호출)"""
+    global _hdf5_trajectory
+    with h5py.File(file_path, "r") as f:
+        if dataset_key not in f:
+            raise KeyError(f"[ERROR] HDF5: {dataset_key} not found. Available keys: {list(f.keys())}")
+        data = f[dataset_key][:]  # [T, D]
+    _hdf5_trajectory = torch.tensor(data, dtype=torch.float32, device=env.device)
 
 
-# ------------------------------------------------------
-# Reward functions
-# ------------------------------------------------------
+def get_hdf5_target(t: int) -> torch.Tensor:
+    global _hdf5_trajectory
+    if _hdf5_trajectory is None:
+        raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
+    T = _hdf5_trajectory.shape[0]
+    idx = min(t, T - 1)
+    return _hdf5_trajectory[idx]
+
+
 def joint_target_error(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """MSE 기반 에러 (음수 가중치로 페널티로 쓰기 좋음)"""
-    q = _get_robot_joint_pos(env)                  # [N, D]
-    target = _moving_target(env, q.shape[1])       # [N, D]
-    return torch.mean((q - target) ** 2, dim=-1)   # [N]
+    q = env.scene["robot"].data.joint_pos
+    target = get_hdf5_target(env.common_step_counter).unsqueeze(0).repeat(env.num_envs, 1)
+    return torch.mean((q - target) ** 2, dim=-1)
+
 
 def joint_target_tanh(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """tanh 기반 보상 (값이 0~1, 가중치는 양수로 쓰는 게 일반적)"""
-    q = _get_robot_joint_pos(env)                  # [N, D]
-    target = _moving_target(env, q.shape[1])       # [N, D]
-    mse = torch.mean((q - target) ** 2, dim=-1)    # [N]
-    return 1.0 - torch.tanh(mse)                   # [N]
+    q = env.scene["robot"].data.joint_pos
+    target = get_hdf5_target(env.common_step_counter).unsqueeze(0).repeat(env.num_envs, 1)
+    mse = torch.mean((q - target) ** 2, dim=-1)
+    return 1.0 - torch.tanh(mse)

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-UR10e + Spindle (manager-based): target joint 값 추종 환경 (간소화 버전)
-- End-effector 포즈 기반 리워드 제거
-- 조인트 값 기반 리워드만 유지
+UR10e + Spindle (manager-based): HDF5 trajectory tracking 환경
 """
 
 from __future__ import annotations
@@ -17,46 +15,25 @@ from isaaclab.managers import (
     RewardTermCfg as RewTerm,
     TerminationTermCfg as DoneTerm,
     EventTermCfg as EventTerm,
-    CurriculumTermCfg as CurrTerm,
 )
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-# 표준 reach MDP 유틸
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
-# 로컬 joint reward
 from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp import rewards as local_rewards
-# 로봇 CFG
 from nrs_lab2.nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
 
 
 # ---------- Scene ----------
 @configclass
 class SpindleSceneCfg(InteractiveSceneCfg):
-    """Ground + Robot + Workpiece"""
     ground = AssetBaseCfg(
         prim_path="/World/ground",
         spawn=sim_utils.GroundPlaneCfg(),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
     )
     robot: AssetBaseCfg = MISSING
-    light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=2500.0),
-    )
-
-    # workpiece (concave surface)
-    workpiece = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Workpiece",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/eunseop/isaac/isaac_save/concave_surface.usd",
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
-    )
 
 
 # ---------- Actions ----------
@@ -90,8 +67,14 @@ class EventCfg:
         params={"position_range": (0.75, 1.25), "velocity_range": (0.0, 0.0)},
     )
 
+    # HDF5 trajectory 로드
+    load_hdf5 = EventTerm(
+        func=local_rewards.load_hdf5_trajectory,
+        mode="reset",
+    )
 
-# ---------- Rewards (조인트 추종) ----------
+
+# ---------- Rewards ----------
 @configclass
 class RewardsCfg:
     joint_target_error = RewTerm(
@@ -113,8 +96,6 @@ class TerminationsCfg:
 # ---------- EnvCfg ----------
 @configclass
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
-    """UR10e(+spindle) target joint 추종 환경"""
-
     scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1024, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -126,7 +107,6 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 2
         self.sim.render_interval = self.decimation
         self.episode_length_s = 12.0
-        self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 60.0
 
         # 로봇 주입
