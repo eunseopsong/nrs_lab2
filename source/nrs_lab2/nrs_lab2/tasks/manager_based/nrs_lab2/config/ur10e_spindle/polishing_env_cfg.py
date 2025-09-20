@@ -18,7 +18,7 @@ class PolishingPoseHoldEnvCfg(UR10eSpindleEnvCfg):
         self.actions.arm_action.scale = 0.2
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 120.0
+        self.episode_length_s = 20.0
 
         # ✅ dataset_key 수정됨
         self.events.load_hdf5 = EventTerm(
