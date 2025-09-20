@@ -120,10 +120,10 @@ class RewardsCfg:
         func=local_rewards.action_smoothness_penalty,
         weight=0.1,
     )
-    q1_stability_reward = RewTerm(
-        func=local_rewards.q1_stability_reward,
-        weight=0.1,
-    )
+    # q1_stability_reward = RewTerm(
+    #     func=local_rewards.q1_stability_reward,
+    #     weight=0.1,
+    # )
 
 
 # ---------- Terminations ----------

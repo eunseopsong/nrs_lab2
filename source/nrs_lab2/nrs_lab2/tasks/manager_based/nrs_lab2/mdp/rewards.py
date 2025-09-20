@@ -88,11 +88,11 @@ def action_smoothness_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
     return -torch.mean(diff ** 2, dim=-1)
 
 
-def q1_stability_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """q1이 0에 가까울수록 보상"""
-    q = env.scene["robot"].data.joint_pos
-    q1 = q[:, 0]
-    return -q1**2
+# def q1_stability_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
+#     """q1이 0에 가까울수록 보상"""
+#     q = env.scene["robot"].data.joint_pos
+#     q1 = q[:, 0]
+#     return -q1**2
 
 
 # -------------------
