@@ -29,6 +29,10 @@ def get_hdf5_target(t: int) -> torch.Tensor:
     return _hdf5_trajectory[idx]
 
 
+# -------------------
+# Reward functions
+# -------------------
+
 def joint_target_error(env: ManagerBasedRLEnv) -> torch.Tensor:
     q = env.scene["robot"].data.joint_pos
     target = get_hdf5_target(env.common_step_counter).unsqueeze(0).repeat(env.num_envs, 1)
@@ -43,20 +47,36 @@ def joint_target_tanh(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 
 def joint_velocity_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """속도 제곱 페널티: 로봇이 과도하게 빠르게 움직이지 않도록 억제"""
+    """속도가 너무 빠르면 패널티"""
     qd = env.scene["robot"].data.joint_vel
     return -torch.mean(qd ** 2, dim=-1)
 
+
+def action_smoothness_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """
+    직전 액션과 현재 액션 차이를 줄이도록 유도
+    - joint_pos_target 사용 (policy가 낸 action이 여기에 들어감)
+    """
+    if not hasattr(env, "_last_action"):
+        env._last_action = torch.zeros_like(env.scene["robot"].data.joint_pos_target)
+
+    current_action = env.scene["robot"].data.joint_pos_target.clone()
+    diff = current_action - env._last_action
+    env._last_action = current_action.detach()
+
+    return -torch.mean(diff ** 2, dim=-1)
+
+
+# -------------------
+# Termination function
+# -------------------
 
 def reached_end(env: ManagerBasedRLEnv) -> torch.Tensor:
     """HDF5 trajectory 끝에 도달하면 종료"""
     global _hdf5_trajectory
     if _hdf5_trajectory is None:
-        # 모든 env에 대해 False 반환
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     T = _hdf5_trajectory.shape[0]
-    # step counter가 trajectory 끝을 넘으면 True
-    done = env.common_step_counter >= (T - 1)
-    return torch.full((env.num_envs,), done, dtype=torch.bool, device=env.device)
-
+    return torch.tensor(env.common_step_counter >= (T - 1),
+                        dtype=torch.bool, device=env.device).repeat(env.num_envs)

@@ -104,10 +104,15 @@ class RewardsCfg:
         func=local_rewards.joint_target_tanh,
         weight=1.0,
     )
-    joint_vel_penalty = RewTerm(
+    joint_velocity_penalty = RewTerm(
         func=local_rewards.joint_velocity_penalty,
-        weight=0.05,   # 속도 페널티 비율 (상황 보고 조정)
+        weight=-0.05,   # 속도 제약 (값은 상황 따라 조정)
     )
+    action_smoothness_penalty = RewTerm(
+        func=local_rewards.action_smoothness_penalty,
+        weight=-0.05,   # 급격한 액션 변화 억제
+    )
+
 
 
 # ---------- Terminations ----------
