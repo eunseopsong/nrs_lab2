@@ -106,16 +106,16 @@ class EventCfg:
 class RewardsCfg:
     joint_target_error = RewTerm(
         func=local_rewards.joint_target_error,
-        weight=0.6,   # tracking을 보상으로 쓰므로 +
+        weight=1.00,   # tracking을 보상으로 쓰므로 +
     )
-    joint_velocity_penalty = RewTerm(
-        func=local_rewards.joint_velocity_penalty,
-        weight=0.3,   # smoothness (패널티지만 weight는 양수, 함수에서 - 처리됨)
-    )
-    q1_stability_reward = RewTerm(
-        func=local_rewards.q1_stability_reward,
-        weight=0.1,
-    )
+    # joint_velocity_penalty = RewTerm(
+    #     func=local_rewards.joint_velocity_penalty,
+    #     weight=0.05,   # smoothness (패널티지만 weight는 양수, 함수에서 - 처리됨)
+    # )
+    # q1_stability_reward = RewTerm(
+    #     func=local_rewards.q1_stability_reward,
+    #     weight=0.10,
+    # )
 
 
 # ---------- Terminations ----------
