@@ -126,7 +126,7 @@ class RewardsCfg:
 @configclass
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    reached_end = DoneTerm(func=local_rewards.reached_end)
+    # reached_end = DoneTerm(func=local_rewards.reached_end)
 
 
 # ---------- EnvCfg ----------
