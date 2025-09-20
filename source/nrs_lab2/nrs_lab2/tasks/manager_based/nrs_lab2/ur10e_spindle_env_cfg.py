@@ -114,12 +114,17 @@ class RewardsCfg:
     )
     joint_velocity_penalty = RewTerm(
         func=local_rewards.joint_velocity_penalty,
-        weight=-0.05,
+        weight=0.3,
     )
     action_smoothness_penalty = RewTerm(
         func=local_rewards.action_smoothness_penalty,
-        weight=-0.05,
+        weight=0.3,
     )
+    q1_stability_reward = RewTerm(
+        func=local_rewards.q1_stability_reward,
+        weight=0.5,
+    )
+
 
 
 # ---------- Terminations ----------
