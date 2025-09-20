@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 UR10e + Spindle (manager-based): target joint 값 추종 환경
-- End-effector 포즈 기반 리워드 제거
-- 조인트 값 기반 리워드 + 안정화 리워드 추가
-- Termination: 시간 기반 (120초)
+- Joint position 기반 imitation
+- Early-stage penalty 추가
+- Termination: 시간 기반 (15초)
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-# 표준 reach MDP 유틸
+# Reach MDP 유틸
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
-# 로컬 joint reward & termination
+# Local rewards
 from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp import rewards as local_rewards
 # 로봇 CFG
 from nrs_lab2.nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
@@ -106,22 +106,25 @@ class EventCfg:
 class RewardsCfg:
     joint_target_error = RewTerm(
         func=local_rewards.joint_target_error,
-        weight=0.85,   # tracking을 보상으로 쓰므로 +
+        weight=0.75,
     )
     joint_velocity_penalty = RewTerm(
         func=local_rewards.joint_velocity_penalty,
-        weight=0.05,   # smoothness (패널티지만 weight는 양수, 함수에서 - 처리됨)
+        weight=0.1,
     )
     q1_stability_reward = RewTerm(
         func=local_rewards.q1_stability_reward,
-        weight=0.10,
+        weight=0.05,
+    )
+    early_stage_penalty = RewTerm(
+        func=local_rewards.early_stage_penalty,
+        weight=0.1,
     )
 
 
 # ---------- Terminations ----------
 @configclass
 class TerminationsCfg:
-    # ✅ 120초 timeout
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
 
@@ -130,7 +133,7 @@ class TerminationsCfg:
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     """UR10e(+spindle) target joint 추종 환경"""
 
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=128, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=16, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
@@ -140,10 +143,9 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.sim.dt = 1.0 / 60.0
-        self.episode_length_s = 60.0   # ⏱️ 120초
-
+        self.episode_length_s = 30.0   # ✅ 15초로 단축
         self.viewer.eye = (3.5, 3.5, 3.5)
+        self.sim.dt = 1.0 / 30.0
 
         # 로봇 주입
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
