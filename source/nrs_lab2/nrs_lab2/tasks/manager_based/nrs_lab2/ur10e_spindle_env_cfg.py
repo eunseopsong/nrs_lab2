@@ -4,7 +4,6 @@ UR10e + Spindle (manager-based): target joint 값 추종 환경
 - End-effector 포즈 기반 리워드 제거
 - 조인트 값 기반 리워드만 유지
 - Scene 요소 (ground, robot, light, workpiece) 포함
-- Termination 조건: HDF5 trajectory 마지막 값에 도달하면 종료
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 # 표준 reach MDP 유틸
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
-# 로컬 joint reward + HDF5 termination
+# 로컬 joint reward
 from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp import rewards as local_rewards
 # 로봇 CFG
 from nrs_lab2.nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
@@ -105,12 +104,16 @@ class RewardsCfg:
         func=local_rewards.joint_target_tanh,
         weight=1.0,
     )
+    joint_vel_penalty = RewTerm(
+        func=local_rewards.joint_velocity_penalty,
+        weight=0.05,   # 속도 페널티 비율 (상황 보고 조정)
+    )
 
 
 # ---------- Terminations ----------
 @configclass
 class TerminationsCfg:
-    # 기존 time_out 제거
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
     reached_end = DoneTerm(func=local_rewards.reached_end)
 
 
@@ -119,7 +122,7 @@ class TerminationsCfg:
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     """UR10e(+spindle) target joint 추종 환경"""
 
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1024, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=256, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()

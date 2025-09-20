@@ -42,16 +42,21 @@ def joint_target_tanh(env: ManagerBasedRLEnv) -> torch.Tensor:
     return 1.0 - torch.tanh(mse)
 
 
-# ---------------------------
-# Termination: reached_end
-# ---------------------------
+def joint_velocity_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """속도 제곱 페널티: 로봇이 과도하게 빠르게 움직이지 않도록 억제"""
+    qd = env.scene["robot"].data.joint_vel
+    return -torch.mean(qd ** 2, dim=-1)
+
+
 def reached_end(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """
-    종료 조건: HDF5 trajectory 마지막 값에 도달하면 True
-    """
+    """HDF5 trajectory 끝에 도달하면 종료"""
     global _hdf5_trajectory
     if _hdf5_trajectory is None:
-        raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
+        # 모든 env에 대해 False 반환
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
     T = _hdf5_trajectory.shape[0]
+    # step counter가 trajectory 끝을 넘으면 True
     done = env.common_step_counter >= (T - 1)
-    return torch.tensor([done] * env.num_envs, dtype=torch.bool, device=env.device)
+    return torch.full((env.num_envs,), done, dtype=torch.bool, device=env.device)
+
