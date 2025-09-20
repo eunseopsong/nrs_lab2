@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-UR10e + Spindle (manager-based): target joint 값 추종 환경 (V7)
-- Termination 조건: 시간 기반 (20초)
-- Rewards: joint tracking + velocity penalty + action smoothness penalty
+UR10e + Spindle (manager-based): target joint 값 추종 환경
+- End-effector 포즈 기반 리워드 제거
+- 조인트 값 기반 리워드 + 안정화 리워드 추가
+- Scene 요소 (ground, robot, light, workpiece) 포함
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 # 표준 reach MDP 유틸
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
-# 로컬 joint reward
+# 로컬 joint reward & termination
 from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp import rewards as local_rewards
 # 로봇 CFG
 from nrs_lab2.nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
@@ -90,6 +91,14 @@ class EventCfg:
         mode="reset",
         params={"position_range": (0.75, 1.25), "velocity_range": (0.0, 0.0)},
     )
+    load_hdf5 = EventTerm(
+        func=local_rewards.load_hdf5_trajectory,
+        mode="reset",
+        params={
+            "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording.h5",
+            "dataset_key": "joint_positions",
+        },
+    )
 
 
 # ---------- Rewards ----------
@@ -117,6 +126,7 @@ class RewardsCfg:
 @configclass
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    reached_end = DoneTerm(func=local_rewards.reached_end)
 
 
 # ---------- EnvCfg ----------
@@ -134,7 +144,7 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 20.0  # 20초 limit
+        self.episode_length_s = 20.0   # ⏱️ 넉넉하게 20초
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 60.0
 
