@@ -40,3 +40,18 @@ def joint_target_tanh(env: ManagerBasedRLEnv) -> torch.Tensor:
     target = get_hdf5_target(env.common_step_counter).unsqueeze(0).repeat(env.num_envs, 1)
     mse = torch.mean((q - target) ** 2, dim=-1)
     return 1.0 - torch.tanh(mse)
+
+
+# ---------------------------
+# Termination: reached_end
+# ---------------------------
+def reached_end(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """
+    종료 조건: HDF5 trajectory 마지막 값에 도달하면 True
+    """
+    global _hdf5_trajectory
+    if _hdf5_trajectory is None:
+        raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
+    T = _hdf5_trajectory.shape[0]
+    done = env.common_step_counter >= (T - 1)
+    return torch.tensor([done] * env.num_envs, dtype=torch.bool, device=env.device)
