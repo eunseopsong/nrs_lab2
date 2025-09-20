@@ -20,13 +20,20 @@ def load_hdf5_trajectory(env: ManagerBasedRLEnv, env_ids, file_path: str, datase
     _hdf5_trajectory = torch.tensor(data, dtype=torch.float32, device=env.device)
 
 
-def get_hdf5_target(t: int) -> torch.Tensor:
+def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
     global _hdf5_trajectory
     if _hdf5_trajectory is None:
         raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
-    T = _hdf5_trajectory.shape[0]
-    idx = min(t, T - 1)
+
+    T = _hdf5_trajectory.shape[0]              # HDF5 길이
+    E = env.max_episode_length                 # episode step 수 (예: 3600)
+    step = env.common_step_counter
+
+    # 🔑 HDF5 인덱스를 episode 진행도에 맞춰 스케일링
+    idx = min(int(step / E * T), T - 1)
+
     return _hdf5_trajectory[idx]
+
 
 
 # -------------------
@@ -34,17 +41,13 @@ def get_hdf5_target(t: int) -> torch.Tensor:
 # -------------------
 
 def joint_target_error(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """MSE 기반: target joints 와 현재 joints 차이"""
     q = env.scene["robot"].data.joint_pos
-    T = _hdf5_trajectory.shape[0]
-    idx = min(env.common_step_counter, T - 1)
-    target = get_hdf5_target(env.common_step_counter).unsqueeze(0).repeat(env.num_envs, 1)
+    target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
     error = torch.mean((q - target) ** 2, dim=-1)
 
-    # ✅ 디버그 출력 (env 0만)
-    if env.common_step_counter % 100 == 0:  # 매 100 step마다 출력
+    if env.common_step_counter % 100 == 0:
         current_time = env.common_step_counter * env.step_dt
-        print(f"[Step {env.common_step_counter} | Time {current_time:.2f}s | HDF5 idx {idx}] "
+        print(f"[Step {env.common_step_counter} | Time {current_time:.2f}s] "
               f"Target[0]: {target[0].cpu().numpy()} "
               f"Current[0]: {q[0].cpu().numpy()} "
               f"Error[0]: {error[0].item():.6f}")
@@ -53,12 +56,12 @@ def joint_target_error(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 
 
-
 def joint_target_tanh(env: ManagerBasedRLEnv) -> torch.Tensor:
     q = env.scene["robot"].data.joint_pos
-    target = get_hdf5_target(env.common_step_counter).unsqueeze(0).repeat(env.num_envs, 1)
+    target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
     mse = torch.mean((q - target) ** 2, dim=-1)
     return 1.0 - torch.tanh(mse)
+
 
 
 def joint_velocity_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
