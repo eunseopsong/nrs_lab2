@@ -7,9 +7,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+# -------------------
+# Global buffer
+# -------------------
 _hdf5_trajectory = None
 
 
+# -------------------
+# HDF5 trajectory loader
+# -------------------
 def load_hdf5_trajectory(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "joint_positions"):
     """HDF5 trajectory 데이터를 로드 (reset 시 1회 호출)"""
     global _hdf5_trajectory
@@ -21,6 +27,7 @@ def load_hdf5_trajectory(env: ManagerBasedRLEnv, env_ids, file_path: str, datase
 
 
 def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """현재 episode step에 해당하는 HDF5 target joint 값 반환"""
     global _hdf5_trajectory
     if _hdf5_trajectory is None:
         raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
@@ -37,17 +44,16 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
     return _hdf5_trajectory[idx]
 
 
-
-
 # -------------------
 # Reward functions
 # -------------------
-
 def joint_target_error(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """목표 joint position tracking 오차 (MSE 기반)"""
     q = env.scene["robot"].data.joint_pos
     target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
     error = torch.mean((q - target) ** 2, dim=-1)
 
+    # Debug 출력
     if env.common_step_counter % 100 == 0:
         current_time = env.common_step_counter * env.step_dt
         print(f"[Step {env.common_step_counter} | Time {current_time:.2f}s] "
@@ -55,50 +61,26 @@ def joint_target_error(env: ManagerBasedRLEnv) -> torch.Tensor:
               f"Current[0]: {q[0].cpu().numpy()} "
               f"Error[0]: {error[0].item():.6f}")
 
-    return error
-
-
-
-def joint_target_tanh(env: ManagerBasedRLEnv) -> torch.Tensor:
-    q = env.scene["robot"].data.joint_pos
-    target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
-    mse = torch.mean((q - target) ** 2, dim=-1)
-    return 1.0 - torch.tanh(mse)
-
+    # tracking은 보상이므로 -error 반환
+    return -error
 
 
 def joint_velocity_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """속도가 너무 빠르면 패널티"""
+    """속도가 너무 빠르면 패널티 (학습 안정화를 위한 smoothness 역할)"""
     qd = env.scene["robot"].data.joint_vel
-    return -torch.mean(qd ** 2, dim=-1)
+    return -0.01 * torch.mean(qd ** 2, dim=-1)   # 🔑 scale 낮게
 
 
-def action_smoothness_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """
-    직전 액션과 현재 액션 차이를 줄이도록 유도
-    - joint_pos_target 사용 (policy가 낸 action이 여기에 들어감)
-    """
-    if not hasattr(env, "_last_action"):
-        env._last_action = torch.zeros_like(env.scene["robot"].data.joint_pos_target)
-
-    current_action = env.scene["robot"].data.joint_pos_target.clone()
-    diff = current_action - env._last_action
-    env._last_action = current_action.detach()
-
-    return -torch.mean(diff ** 2, dim=-1)
-
-
-# def q1_stability_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
-#     """q1이 0에 가까울수록 보상"""
-#     q = env.scene["robot"].data.joint_pos
-#     q1 = q[:, 0]
-#     return -q1**2
+def q1_stability_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """q1이 0에 가까울수록 보상"""
+    q = env.scene["robot"].data.joint_pos
+    q1 = q[:, 0]
+    return -0.1 * q1**2   # 🔑 tracking 보조 term
 
 
 # -------------------
 # Termination function
 # -------------------
-
 def reached_end(env: ManagerBasedRLEnv) -> torch.Tensor:
     """HDF5 trajectory 끝에 도달하면 종료"""
     global _hdf5_trajectory

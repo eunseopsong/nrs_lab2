@@ -106,30 +106,23 @@ class EventCfg:
 class RewardsCfg:
     joint_target_error = RewTerm(
         func=local_rewards.joint_target_error,
-        weight=-1.0,
-    )
-    joint_target_tanh = RewTerm(
-        func=local_rewards.joint_target_tanh,
-        weight=1.0,
+        weight=0.6,   # tracking을 보상으로 쓰므로 +
     )
     joint_velocity_penalty = RewTerm(
         func=local_rewards.joint_velocity_penalty,
+        weight=0.3,   # smoothness (패널티지만 weight는 양수, 함수에서 - 처리됨)
+    )
+    q1_stability_reward = RewTerm(
+        func=local_rewards.q1_stability_reward,
         weight=0.1,
     )
-    action_smoothness_penalty = RewTerm(
-        func=local_rewards.action_smoothness_penalty,
-        weight=0.1,
-    )
-    # q1_stability_reward = RewTerm(
-    #     func=local_rewards.q1_stability_reward,
-    #     weight=0.1,
-    # )
 
 
 # ---------- Terminations ----------
 @configclass
 class TerminationsCfg:
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)  # ✅ 120초 timeout
+    # ✅ 120초 timeout
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
 
 # ---------- EnvCfg ----------
@@ -147,9 +140,10 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 60.0   # ⏱️ 넉넉하게 120초
-        self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 60.0
+        self.episode_length_s = 60.0   # ⏱️ 120초
+
+        self.viewer.eye = (3.5, 3.5, 3.5)
 
         # 로봇 주입
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
