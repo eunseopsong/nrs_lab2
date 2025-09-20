@@ -3,7 +3,7 @@
 UR10e + Spindle (manager-based): target joint 값 추종 환경
 - End-effector 포즈 기반 리워드 제거
 - 조인트 값 기반 리워드 + 안정화 리워드 추가
-- Scene 요소 (ground, robot, light, workpiece) 포함
+- Termination: 시간 기반 (120초)
 """
 
 from __future__ import annotations
@@ -114,24 +114,22 @@ class RewardsCfg:
     )
     joint_velocity_penalty = RewTerm(
         func=local_rewards.joint_velocity_penalty,
-        weight=0.10,
+        weight=0.1,
     )
     action_smoothness_penalty = RewTerm(
         func=local_rewards.action_smoothness_penalty,
-        weight=0.10,
+        weight=0.1,
     )
     q1_stability_reward = RewTerm(
         func=local_rewards.q1_stability_reward,
-        weight=0.10,
+        weight=0.1,
     )
-
 
 
 # ---------- Terminations ----------
 @configclass
 class TerminationsCfg:
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # reached_end = DoneTerm(func=local_rewards.reached_end)
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)  # ✅ 120초 timeout
 
 
 # ---------- EnvCfg ----------
@@ -149,7 +147,7 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 20.0   # ⏱️ 넉넉하게 20초
+        self.episode_length_s = 120.0   # ⏱️ 넉넉하게 120초
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 60.0
 
