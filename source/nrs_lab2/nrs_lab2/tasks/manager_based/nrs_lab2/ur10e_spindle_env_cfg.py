@@ -133,7 +133,7 @@ class TerminationsCfg:
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     """UR10e(+spindle) target joint 추종 환경"""
 
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=16, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=4, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
@@ -143,9 +143,9 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 30.0   # ✅ 15초로 단축
+        self.episode_length_s = 15.0   # ✅ 15초로 단축
         self.viewer.eye = (3.5, 3.5, 3.5)
-        self.sim.dt = 1.0 / 30.0
+        self.sim.dt = 1.0 / 15.0
 
         # 로봇 주입
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
