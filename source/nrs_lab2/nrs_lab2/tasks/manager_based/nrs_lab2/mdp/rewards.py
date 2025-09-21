@@ -26,7 +26,7 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
         raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
 
     T = _hdf5_trajectory.shape[0]      # HDF5 길이
-    E = env.max_episode_length         # episode step 수 (예: 3600)
+    E = env.max_episode_length         # episode step 수
 
     # episode 내부 step counter 사용 (reset 시 0으로 돌아감)
     step = env.episode_length_buf[0].item()
@@ -41,16 +41,24 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
 # Reward functions
 # -------------------
 
-def joint_target_error_strict(env: ManagerBasedRLEnv, scale: float = 100.0) -> torch.Tensor:
-    """Strict joint tracking reward (exponential shaping + 디버깅 출력)"""
-    q = env.scene["robot"].data.joint_pos
-    target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
-    mse = torch.mean((q - target) ** 2, dim=-1)
+def joint_target_error_strict(env: ManagerBasedRLEnv, scale: float = 50.0) -> torch.Tensor:
+    """
+    각 joint별 target과 현재값 차이가 0에 가까울수록 큰 보상
+    - 조인트별로 exp(-scale * (diff^2)) 계산 후 평균 사용
+    - 디버깅 출력은 기존 형식 유지
+    """
+    q = env.scene["robot"].data.joint_pos  # [num_envs, num_joints]
+    target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)  # [num_envs, num_joints]
 
-    # exp shaping: 작은 mse일수록 급격히 큰 보상
-    reward = torch.exp(-scale * mse)
+    # per-joint reward (exp shaping)
+    diffs = q - target
+    mse = torch.mean(diffs ** 2, dim=-1)  # 기존 MSE도 계산 (출력용)
+    rewards = torch.exp(-scale * (diffs ** 2))  # [num_envs, num_joints]
 
-    # ✅ 디버깅 출력
+    # 전체 reward = 평균
+    reward = torch.mean(rewards, dim=-1)
+
+    # ✅ 디버깅 출력 (원래 형식 유지)
     if env.common_step_counter % 100 == 0:
         current_time = env.common_step_counter * env.step_dt
         print(f"[Step {env.common_step_counter} | Time {current_time:.2f}s] "
@@ -59,19 +67,6 @@ def joint_target_error_strict(env: ManagerBasedRLEnv, scale: float = 100.0) -> t
               f"MSE[0]: {mse[0].item():.6f}, Reward[0]: {reward[0].item():.6f}")
 
     return reward
-
-
-def joint_velocity_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """속도가 너무 빠르면 패널티 (smoothness 역할)"""
-    qd = env.scene["robot"].data.joint_vel
-    return -0.01 * torch.mean(qd ** 2, dim=-1)
-
-
-def q1_stability_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """q1이 0에 가까울수록 보상"""
-    q = env.scene["robot"].data.joint_pos
-    q1 = q[:, 0]
-    return -0.1 * q1**2
 
 
 # -------------------

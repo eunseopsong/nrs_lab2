@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 UR10e + Spindle (manager-based): target joint 값 추종 환경
-- Joint position 기반 imitation
-- Early-stage penalty 추가
+- Joint position 기반 imitation (per-joint strict reward)
 - Termination: 시간 기반 (15초)
 """
 
@@ -106,17 +105,9 @@ class EventCfg:
 class RewardsCfg:
     joint_target_error_strict = RewTerm(
         func=local_rewards.joint_target_error_strict,
-        weight=1.0,   # strict tracking reward (exp shaping)
-        params={"scale": 500.0},   # strictness 파라미터
+        weight=1.0,
+        params={"scale": 50.0},  # per-joint strict reward scale
     )
-    # joint_velocity_penalty = RewTerm(
-    #     func=local_rewards.joint_velocity_penalty,
-    #     weight=0.15,
-    # )
-    # q1_stability_reward = RewTerm(
-    #     func=local_rewards.q1_stability_reward,
-    #     weight=0.05,
-    # )
 
 
 # ---------- Terminations ----------
@@ -140,7 +131,7 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 30.0   # ✅ 15초로 단축
+        self.episode_length_s = 30.0   # 15초 에피소드
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 30.0
 
