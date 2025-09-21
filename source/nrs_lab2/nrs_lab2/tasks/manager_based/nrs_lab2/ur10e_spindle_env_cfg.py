@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 UR10e + Spindle (manager-based): target joint 값 추종 환경
-- Joint position 기반 imitation (per-joint strict reward)
+- Joint-wise weighted error + q4 active tracking + fast convergence reward
 - Termination: 시간 기반 (15초)
 """
 
@@ -33,21 +33,16 @@ from nrs_lab2.nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
 # ---------- Scene ----------
 @configclass
 class SpindleSceneCfg(InteractiveSceneCfg):
-    """Ground + Robot + Light + Workpiece"""
-
     ground = AssetBaseCfg(
         prim_path="/World/ground",
         spawn=sim_utils.GroundPlaneCfg(),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
     )
-
     robot: AssetBaseCfg = MISSING
-
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=2500.0),
     )
-
     workpiece = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Workpiece",
         spawn=sim_utils.UsdFileCfg(
@@ -103,11 +98,21 @@ class EventCfg:
 # ---------- Rewards ----------
 @configclass
 class RewardsCfg:
-    joint_target_error_strict = RewTerm(
-        func=local_rewards.joint_target_error_strict,
+    joint_target_error_weighted = RewTerm(
+        func=local_rewards.joint_target_error_weighted,
         weight=1.0,
-        params={"scale": 50.0},  # per-joint strict reward scale
+        params={"weights": [2.0, 2.0, 2.0, 5.0, 1.0, 1.0]},  # q4 강조
     )
+    # q4_active_tracking = RewTerm(
+    #     func=local_rewards.q4_active_tracking,
+    #     weight=0.5,
+    #     params={"threshold": 1e-3},
+    # )
+    # fast_convergence_reward = RewTerm(
+    #     func=local_rewards.fast_convergence_reward,
+    #     weight=0.5,
+    #     params={"weights": [1.0, 2.0, 1.0, 4.0, 1.0, 1.0]},  # 동일한 가중치 사용
+    # )
 
 
 # ---------- Terminations ----------
@@ -119,8 +124,6 @@ class TerminationsCfg:
 # ---------- EnvCfg ----------
 @configclass
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
-    """UR10e(+spindle) target joint 추종 환경"""
-
     scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=32, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -135,10 +138,8 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 30.0
 
-        # 로봇 주입
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        # 액션: 모든 조인트 position 제어
         self.actions.arm_action = mdp.JointPositionActionCfg(
             asset_name="robot", joint_names=[".*"], scale=0.2, use_default_offset=True
         )
