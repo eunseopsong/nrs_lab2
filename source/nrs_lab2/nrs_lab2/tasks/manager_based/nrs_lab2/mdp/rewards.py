@@ -21,15 +21,17 @@ def load_hdf5_trajectory(env: ManagerBasedRLEnv, env_ids, file_path: str, datase
 
 
 def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """에피소드 진행도에 맞춰 HDF5 target 반환"""
     global _hdf5_trajectory
     if _hdf5_trajectory is None:
         raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
 
     T = _hdf5_trajectory.shape[0]      # HDF5 길이
-    E = env.max_episode_length         # episode step 수
+    E = env.max_episode_length         # episode step 수 (예: 3600)
 
+    # episode 내부 step counter 사용 (reset 시 0으로 돌아감)
     step = env.episode_length_buf[0].item()
+
+    # 🔑 HDF5 인덱스를 episode 진행도에 맞춰 스케일링
     idx = min(int(step / E * T), T - 1)
 
     return _hdf5_trajectory[idx]
@@ -39,20 +41,24 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
 # Reward functions
 # -------------------
 
-def joint_target_error(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """목표 joint position tracking 오차 (MSE)"""
+def joint_target_error_strict(env: ManagerBasedRLEnv, scale: float = 100.0) -> torch.Tensor:
+    """Strict joint tracking reward (exponential shaping + 디버깅 출력)"""
     q = env.scene["robot"].data.joint_pos
     target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
-    error = torch.mean((q - target) ** 2, dim=-1)
+    mse = torch.mean((q - target) ** 2, dim=-1)
 
-    if env.common_step_counter % 50 == 0:
+    # exp shaping: 작은 mse일수록 급격히 큰 보상
+    reward = torch.exp(-scale * mse)
+
+    # ✅ 디버깅 출력
+    if env.common_step_counter % 100 == 0:
         current_time = env.common_step_counter * env.step_dt
         print(f"[Step {env.common_step_counter} | Time {current_time:.2f}s] "
               f"Target[0]: {target[0].cpu().numpy()} "
               f"Current[0]: {q[0].cpu().numpy()} "
-              f"Error[0]: {error[0].item():.6f}")
+              f"MSE[0]: {mse[0].item():.6f}, Reward[0]: {reward[0].item():.6f}")
 
-    return -error   # tracking은 보상이므로 음수 오차 반환
+    return reward
 
 
 def joint_velocity_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -66,17 +72,6 @@ def q1_stability_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
     q = env.scene["robot"].data.joint_pos
     q1 = q[:, 0]
     return -0.1 * q1**2
-
-
-def early_stage_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """초반 구간에서 target 오차에 큰 패널티"""
-    step = env.episode_length_buf[0].item()
-    if step < 1000:   # 초반 200 step 동안 강화
-        q = env.scene["robot"].data.joint_pos
-        target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
-        error = torch.mean((q - target) ** 2, dim=-1)
-        return -5.0 * error
-    return torch.zeros(env.num_envs, device=env.device)
 
 
 # -------------------

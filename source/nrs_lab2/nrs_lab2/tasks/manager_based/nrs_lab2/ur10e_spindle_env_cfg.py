@@ -104,21 +104,18 @@ class EventCfg:
 # ---------- Rewards ----------
 @configclass
 class RewardsCfg:
-    joint_target_error = RewTerm(
-        func=local_rewards.joint_target_error,
-        weight=0.75,
+    joint_target_error_strict = RewTerm(
+        func=local_rewards.joint_target_error_strict,
+        weight=0.8,   # strict tracking reward (exp shaping)
+        params={"scale": 100.0},   # strictness 파라미터
     )
     joint_velocity_penalty = RewTerm(
         func=local_rewards.joint_velocity_penalty,
-        weight=0.1,
+        weight=0.15,
     )
     q1_stability_reward = RewTerm(
         func=local_rewards.q1_stability_reward,
         weight=0.05,
-    )
-    early_stage_penalty = RewTerm(
-        func=local_rewards.early_stage_penalty,
-        weight=0.1,
     )
 
 
