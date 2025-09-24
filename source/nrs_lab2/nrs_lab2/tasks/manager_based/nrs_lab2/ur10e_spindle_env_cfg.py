@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-UR10e + Spindle (manager-based): BC policy(.pth) 기반 target joint 추종 환경
-- Joint-wise weighted error + q4 active tracking + fast convergence reward
-- Termination: 시간 기반 (15초)
+UR10e + Spindle (manager-based): target joint 값 추종 환경
+- Joint command error + tanh shaped reward
+- Termination: trajectory 끝 or 시간 기반
 """
 
 from __future__ import annotations
@@ -85,12 +85,12 @@ class EventCfg:
         mode="reset",
         params={"position_range": (0.75, 1.25), "velocity_range": (0.0, 0.0)},
     )
-    # ✅ 기존 load_hdf5 → load_bc_policy 로 교체
-    load_bc = EventTerm(
-        func=local_rewards.load_bc_policy,
+    load_hdf5 = EventTerm(
+        func=local_rewards.load_hdf5_trajectory,
         mode="reset",
         params={
-            "file_path": "/home/eunseop/nrs_lab2/datasets/bc_policy.pth",
+            "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording.h5",
+            "dataset_key": "joint_positions",
         },
     )
 
@@ -98,27 +98,22 @@ class EventCfg:
 # ---------- Rewards ----------
 @configclass
 class RewardsCfg:
-    joint_target_error_weighted = RewTerm(
-        func=local_rewards.joint_target_error_weighted,
+    joint_command_error = RewTerm(
+        func=local_rewards.joint_command_error,
         weight=1.0,
-        params={"weights": [2.0, 2.0, 2.0, 5.0, 1.0, 1.0]},  # q4 강조
     )
-    # q4_active_tracking = RewTerm(
-    #     func=local_rewards.q4_active_tracking,
-    #     weight=0.5,
-    #     params={"threshold": 1e-3},
-    # )
-    # fast_convergence_reward = RewTerm(
-    #     func=local_rewards.fast_convergence_reward,
-    #     weight=0.5,
-    #     params={"weights": [1.0, 2.0, 1.0, 4.0, 1.0, 1.0]},  # 동일한 가중치 사용
-    # )
+    joint_command_error_tanh = RewTerm(
+        func=local_rewards.joint_command_error_tanh,
+        weight=0.5,
+        params={"std": 0.1},
+    )
 
 
 # ---------- Terminations ----------
 @configclass
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    reached_end = DoneTerm(func=local_rewards.reached_end)
 
 
 # ---------- EnvCfg ----------
@@ -134,12 +129,14 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 30.0   # 15초 에피소드
+        self.episode_length_s = 30.0
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 30.0
 
+        # 로봇 세팅
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
+        # action 세팅
         self.actions.arm_action = mdp.JointPositionActionCfg(
             asset_name="robot", joint_names=[".*"], scale=0.2, use_default_offset=True
         )

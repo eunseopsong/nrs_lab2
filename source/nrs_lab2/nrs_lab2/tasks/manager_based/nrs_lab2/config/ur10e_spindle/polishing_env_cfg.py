@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-UR10e + Spindle: Joint-Hold 환경 (BC imitation)
+UR10e + Spindle: Joint-Hold 환경 설정
+- Uses joint_recording.h5
+- Reward: joint_command_error only
 """
 
 from __future__ import annotations
@@ -20,12 +22,13 @@ class PolishingPoseHoldEnvCfg(UR10eSpindleEnvCfg):
         self.sim.render_interval = self.decimation
         self.episode_length_s = 30.0
 
-        # ✅ load_bc_policy 호출로 교체
-        self.events.load_bc = EventTerm(
-            func=local_rewards.load_bc_policy,
+        # ✅ load .h5 trajectory instead of .pth
+        self.events.load_hdf5 = EventTerm(
+            func=local_rewards.load_hdf5_trajectory,
             mode="reset",
             params={
-                "file_path": "/home/eunseop/nrs_lab2/datasets/bc_policy.pth",
+                "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording.h5",
+                "dataset_key": "joint_positions",
             },
         )
 
