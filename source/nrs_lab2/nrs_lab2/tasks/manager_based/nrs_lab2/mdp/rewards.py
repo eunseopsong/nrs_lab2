@@ -4,16 +4,20 @@ Reward functions for UR10e + Spindle imitation
 - Joint command error (L2 penalty)
 - Joint command error with tanh kernel (shaping reward)
 - Debugging: print current vs target joint states
+- Visualization: every 30 seconds (episode length), save plot to ~/nrs_lab2/outputs/png/
 """
 
 from __future__ import annotations
+import os
 import torch
+import matplotlib.pyplot as plt
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 _hdf5_trajectory = None
+_joint_tracking_history = []   # (step, target, current) 기록용
 
 
 # -------------------
@@ -21,13 +25,16 @@ _hdf5_trajectory = None
 # -------------------
 def load_hdf5_trajectory(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "joint_positions"):
     """HDF5 trajectory 데이터를 로드 (reset 시 1회 호출)"""
-    global _hdf5_trajectory
+    global _hdf5_trajectory, _joint_tracking_history
     import h5py
     with h5py.File(file_path, "r") as f:
         if dataset_key not in f:
             raise KeyError(f"[ERROR] HDF5: {dataset_key} not found. Available keys: {list(f.keys())}")
         data = f[dataset_key][:]  # [T, D]
     _hdf5_trajectory = torch.tensor(data, dtype=torch.float32, device=env.device)
+
+    # reset history
+    _joint_tracking_history = []
 
 
 def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -49,6 +56,7 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
 # -------------------
 def joint_command_error(env: ManagerBasedRLEnv, command_name=None, asset_cfg=None) -> torch.Tensor:
     """Joint L2 tracking error (penalty)"""
+    global _joint_tracking_history
     q = env.scene["robot"].data.joint_pos
     target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
     diff = q - target
@@ -60,6 +68,15 @@ def joint_command_error(env: ManagerBasedRLEnv, command_name=None, asset_cfg=Non
         print(f"  Target joints[0]: {target[0].cpu().numpy()}")
         print(f"  Current joints[0]: {q[0].cpu().numpy()}")
         print(f"  L2 Error[0]: {error[0].item():.6f}")
+
+    # 기록 (env 0만 저장)
+    _joint_tracking_history.append(
+        (env.common_step_counter, target[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
+    )
+
+    # 30초마다 (episode_length_s 기준) 시각화
+    if env.common_step_counter > 0 and env.common_step_counter % int(env.max_episode_length) == 0:
+        save_joint_tracking_plot(env)
 
     return -error  # penalty
 
@@ -80,6 +97,40 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
         print(f"  tanh Reward[0]: {reward[0].item():.6f}")
 
     return reward
+
+
+# -------------------
+# Visualization
+# -------------------
+def save_joint_tracking_plot(env: ManagerBasedRLEnv):
+    """joint target vs current trajectory 시각화"""
+    global _joint_tracking_history
+
+    if not _joint_tracking_history:
+        return
+
+    steps, targets, currents = zip(*_joint_tracking_history)
+    targets = torch.tensor(targets)
+    currents = torch.tensor(currents)
+
+    plt.figure(figsize=(10, 6))
+    for j in range(targets.shape[1]):
+        plt.plot(steps, targets[:, j], "--", label=f"Target q{j}")
+        plt.plot(steps, currents[:, j], "-", label=f"Current q{j}")
+
+    plt.xlabel("Step")
+    plt.ylabel("Joint Value (rad)")
+    plt.title("Joint Tracking (Target vs Current)")
+    plt.legend(ncol=2, fontsize=8)
+    plt.grid(True)
+
+    # 저장 경로
+    save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"joint_tracking_step{env.common_step_counter}.png")
+    plt.savefig(save_path)
+    plt.close()
+    print(f"[INFO] Saved joint tracking plot to {save_path}")
 
 
 # -------------------
