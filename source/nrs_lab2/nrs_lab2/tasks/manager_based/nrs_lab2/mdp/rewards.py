@@ -76,44 +76,46 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 
 
 # -------------------
+# Joint tracking reward (현재 + 미래 5-step 감쇠 포함, 시각화 연동)
+# -------------------
+# -------------------
 # Joint tracking reward (현재 + 미래 5-step 감쇠 포함)
 # -------------------
-def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.8, horizon: int = 5) -> torch.Tensor:
-    # 현재 조인트 상태
-    currents = env.scene["robot"].data.joint_pos[:, :6]   # [num_envs, D]
-    velocities = env.scene["robot"].data.joint_vel[:, :6] # [num_envs, D]
+def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.8, horizon: int = 5):
+    """미래 target까지 고려한 joint tracking reward (시각화 포함)"""
+    global _joint_tracking_history
 
-    # future target joints (shape: [num_envs, horizon*D])
-    targets_flat = get_hdf5_target_future(env, horizon=horizon)   # [num_envs, horizon*D]
+    # 현재 조인트
+    q = env.scene["robot"].data.joint_pos[:, :6]  # [num_envs, 6]
 
-    # reshape → [num_envs, horizon, D]
-    num_envs, flat_dim = targets_flat.shape
-    D = currents.shape[1]
-    targets = targets_flat.view(num_envs, horizon, D)
+    # ✅ obs_buf 대신 안전하게 함수로 가져오기
+    future_targets = get_hdf5_target_future(env, horizon=horizon)  # [num_envs, horizon*D]
+
+    num_envs, D = q.shape
+    horizon = min(horizon, future_targets.shape[1] // D)
 
     total_reward = torch.zeros(num_envs, device=env.device)
 
     for k in range(horizon):
-        # horizon step 뒤 target
-        target_k = targets[:, k, :]   # [num_envs, D]
+        target_k = future_targets[:, k*D:(k+1)*D]  # [num_envs, 6]
+        diff = q - target_k
 
-        # 현재 상태와의 오차
-        pos_err = currents - target_k
-        vel_err = velocities  # target 속도 = 0 가정
+        rew_pos = -torch.norm(diff, dim=1)
+        rew_tanh = torch.tanh(-torch.norm(diff, dim=1))
+        total_reward += (gamma ** k) * (rew_pos + rew_tanh)
 
-        # 두 가지 reward 항목 (원래 있던 것들)
-        err_sq = (pos_err**2).sum(dim=-1) + (vel_err**2).sum(dim=-1)
-        err_tanh = torch.tanh(pos_err.abs().sum(dim=-1) + vel_err.abs().sum(dim=-1))
+    # ✅ 시각화 (현재 step 값만 기록)
+    if num_envs == 1:
+        step = env.common_step_counter
+        target_now = future_targets[:, :D][0].detach().cpu().numpy()
+        current_now = q[0].detach().cpu().numpy()
+        _joint_tracking_history.append((step, target_now, current_now))
 
-        # 감쇠율 적용
-        weight = gamma**k
-        total_reward += weight * ( -err_sq - err_tanh )
+    # ✅ episode 끝나면 plot 저장
+    if env.common_step_counter > 0 and env.common_step_counter % int(env.max_episode_length) == 0:
+        save_joint_tracking_plot(env)
 
     return total_reward
-
-
-
-
 
 
 
