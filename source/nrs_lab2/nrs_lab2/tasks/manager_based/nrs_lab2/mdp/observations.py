@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Observation functions for UR10e spindle environment.
-- Load and provide HDF5 trajectory targets
+Observation utilities for UR10e spindle environment.
 """
 
 import torch
@@ -17,32 +16,33 @@ _step_idx = 0
 # ------------------------------------------------------
 # HDF5 trajectory loader
 # ------------------------------------------------------
-def load_hdf5_trajectory(env: ManagerBasedRLEnv, trajectory: torch.Tensor):
-    """Register HDF5 trajectory into global buffer (reset at episode start)."""
+def load_hdf5_trajectory(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "joint_positions"):
+    """HDF5 trajectory 데이터를 로드 (reset 시 1회 호출)"""
     global _hdf5_trajectory, _step_idx
-    _hdf5_trajectory = trajectory.clone().to(env.device)
+    import h5py
+
+    with h5py.File(file_path, "r") as f:
+        if dataset_key not in f:
+            raise KeyError(f"[ERROR] HDF5: {dataset_key} not found. Available keys: {list(f.keys())}")
+        data = f[dataset_key][:]  # [T, D]
+
+    _hdf5_trajectory = torch.tensor(data, dtype=torch.float32, device=env.device)
     _step_idx = 0
     print(f"[INFO] Loaded HDF5 trajectory of shape {_hdf5_trajectory.shape}")
 
 
 # ------------------------------------------------------
-# Observation: current target joints from trajectory
+# Observation: next target joints
 # ------------------------------------------------------
-def get_hdf5_target(env: ManagerBasedRLEnv, env_ids: torch.Tensor) -> torch.Tensor:
-    """Return next target joint positions for each env."""
+def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """현재 step에 해당하는 target joint 반환"""
     global _hdf5_trajectory, _step_idx
     if _hdf5_trajectory is None:
-        print("[DEBUG] get_hdf5_target: trajectory is None → returning zeros")
-        return torch.zeros((len(env_ids), 6), device=env.device)
+        raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
 
-    targets = []
-    for _ in env_ids.tolist():
-        if _step_idx < _hdf5_trajectory.shape[0]:
-            targets.append(_hdf5_trajectory[_step_idx])
-        else:
-            targets.append(torch.zeros(6, device=env.device))
+    T = _hdf5_trajectory.shape[0]
+    E = env.max_episode_length
+    step = env.episode_length_buf[0].item()
+    idx = min(int(step / E * T), T - 1)
 
-    targets = torch.stack(targets, dim=0)
-    _step_idx += 1
-
-    return targets
+    return _hdf5_trajectory[idx]
