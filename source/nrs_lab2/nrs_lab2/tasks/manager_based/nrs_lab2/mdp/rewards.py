@@ -108,20 +108,27 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, weight_pos: float = 1.0, weigh
 _episode_counter = 0   # ✅ 전역 카운터
 
 def save_joint_tracking_plot(env: ManagerBasedRLEnv):
-    """joint target vs current trajectory 시각화"""
+    """joint target vs current trajectory 시각화 (q1~q6, 같은 번호는 같은 색)"""
     global _joint_tracking_history, _episode_counter
 
     if not _joint_tracking_history:
         return
+
+    import numpy as np
+    import matplotlib.pyplot as plt
 
     steps, targets, currents = zip(*_joint_tracking_history)
     targets = torch.from_numpy(np.array(targets))   # ✅ 속도 개선
     currents = torch.from_numpy(np.array(currents))
 
     plt.figure(figsize=(10, 6))
+    colors = plt.cm.tab10.colors  # tab10 팔레트 (10개 색상)
+
     for j in range(targets.shape[1]):
-        plt.plot(steps, targets[:, j], "--", label=f"Target q{j}")
-        plt.plot(steps, currents[:, j], "-", label=f"Current q{j}")
+        color = colors[j % len(colors)]
+        # q1~q6로 라벨링
+        plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=color, linewidth=1.2)
+        plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=color, linewidth=2.0)
 
     plt.xlabel("Step")
     plt.ylabel("Joint Value (rad)")
@@ -141,6 +148,7 @@ def save_joint_tracking_plot(env: ManagerBasedRLEnv):
 
     _episode_counter += 1        # 다음 episode 번호 증가
     _joint_tracking_history = [] # 다음 episode를 위해 초기화
+
 
 
 
