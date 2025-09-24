@@ -104,16 +104,17 @@ class RewardsCfg:
     )
     joint_command_error_tanh = RewTerm(
         func=local_rewards.joint_command_error_tanh,
-        weight=0.5,
-        params={"std": 0.1},
+        weight=1.0,
+        params={"std": 0.5},
     )
+
 
 
 # ---------- Terminations ----------
 @configclass
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    reached_end = DoneTerm(func=local_rewards.reached_end)
+    # reached_end = DoneTerm(func=local_rewards.reached_end)
 
 
 # ---------- EnvCfg ----------

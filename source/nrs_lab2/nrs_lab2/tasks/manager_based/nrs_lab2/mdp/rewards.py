@@ -47,7 +47,7 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
 # -------------------
 # Reward functions
 # -------------------
-def joint_command_error(env: ManagerBasedRLEnv) -> torch.Tensor:
+def joint_command_error(env: ManagerBasedRLEnv, command_name=None, asset_cfg=None) -> torch.Tensor:
     """Joint L2 tracking error (penalty)"""
     q = env.scene["robot"].data.joint_pos
     target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
@@ -64,7 +64,7 @@ def joint_command_error(env: ManagerBasedRLEnv) -> torch.Tensor:
     return -error  # penalty
 
 
-def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1) -> torch.Tensor:
+def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_name=None, asset_cfg=None) -> torch.Tensor:
     """Joint L2 tracking error with tanh shaping"""
     q = env.scene["robot"].data.joint_pos
     target = get_hdf5_target(env).unsqueeze(0).repeat(env.num_envs, 1)
@@ -85,7 +85,7 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1) -> torch.
 # -------------------
 # Termination function
 # -------------------
-def reached_end(env: ManagerBasedRLEnv) -> torch.Tensor:
+def reached_end(env: ManagerBasedRLEnv, command_name=None, asset_cfg=None) -> torch.Tensor:
     """Trajectory 끝에 도달하면 종료"""
     global _hdf5_trajectory
     if _hdf5_trajectory is None:
