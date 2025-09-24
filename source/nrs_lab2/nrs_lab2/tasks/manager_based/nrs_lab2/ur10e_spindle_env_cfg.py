@@ -134,7 +134,7 @@ class TerminationsCfg:
 # ---------- EnvCfg ----------
 @configclass
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=32, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=16, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
