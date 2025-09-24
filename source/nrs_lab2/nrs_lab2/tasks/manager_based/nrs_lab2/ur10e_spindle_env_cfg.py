@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-UR10e + Spindle (manager-based): target joint 값 추종 환경
-- Joint-wise weighted error + q4 active tracking + fast convergence reward
-- Termination: 시간 기반 (15초)
+UR10e + Spindle (manager-based, BC policy 추종)
 """
 
 from __future__ import annotations
@@ -14,21 +12,15 @@ from isaaclab.managers import (
     ActionTermCfg as ActionTerm,
     ObservationGroupCfg as ObsGroup,
     ObservationTermCfg as ObsTerm,
-    RewardTermCfg as RewTerm,
     TerminationTermCfg as DoneTerm,
-    EventTermCfg as EventTerm,
 )
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-# Reach MDP 유틸
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
-# Local rewards
-from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp import rewards as local_rewards
-# 로봇 CFG
 from nrs_lab2.nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
-
+from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2 import rewards as local_rewards
 
 # ---------- Scene ----------
 @configclass
@@ -54,13 +46,6 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-
-# ---------- Actions ----------
-@configclass
-class ActionsCfg:
-    arm_action: ActionTerm = MISSING
-
-
 # ---------- Observations ----------
 @configclass
 class ObservationsCfg:
@@ -76,70 +61,35 @@ class ObservationsCfg:
 
     policy: PolicyCfg = PolicyCfg()
 
-
-# ---------- Events ----------
-@configclass
-class EventCfg:
-    reset_robot_joints = EventTerm(
-        func=mdp.reset_joints_by_scale,
-        mode="reset",
-        params={"position_range": (0.75, 1.25), "velocity_range": (0.0, 0.0)},
-    )
-    load_hdf5 = EventTerm(
-        func=local_rewards.load_hdf5_trajectory,
-        mode="reset",
-        params={
-            "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording.h5",
-            "dataset_key": "joint_positions",
-        },
-    )
-
-
-# ---------- Rewards ----------
-@configclass
-class RewardsCfg:
-    joint_target_error_weighted = RewTerm(
-        func=local_rewards.joint_target_error_weighted,
-        weight=1.0,
-        params={"weights": [2.0, 2.0, 2.0, 5.0, 1.0, 1.0]},  # q4 강조
-    )
-    # q4_active_tracking = RewTerm(
-    #     func=local_rewards.q4_active_tracking,
-    #     weight=0.5,
-    #     params={"threshold": 1e-3},
-    # )
-    # fast_convergence_reward = RewTerm(
-    #     func=local_rewards.fast_convergence_reward,
-    #     weight=0.5,
-    #     params={"weights": [1.0, 2.0, 1.0, 4.0, 1.0, 1.0]},  # 동일한 가중치 사용
-    # )
-
-
 # ---------- Terminations ----------
 @configclass
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-
 
 # ---------- EnvCfg ----------
 @configclass
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=32, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
-    actions: ActionsCfg = ActionsCfg()
-    rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
-    events: EventCfg = EventCfg()
 
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 30.0   # 15초 에피소드
+        self.episode_length_s = 30.0
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 30.0
 
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        self.actions.arm_action = mdp.JointPositionActionCfg(
-            asset_name="robot", joint_names=[".*"], scale=0.2, use_default_offset=True
+        # 🔥 Action = BC policy prediction
+        def bc_action_wrapper(env, obs):
+            q_current = obs[:, :6]
+            q_pred = local_rewards.get_bc_action(env, obs)
+            scale = 0.2
+            return (q_pred - q_current) / scale
+
+        self.actions.arm_action = ActionTermCfg(
+            func=bc_action_wrapper,
+            asset_name="robot",
         )

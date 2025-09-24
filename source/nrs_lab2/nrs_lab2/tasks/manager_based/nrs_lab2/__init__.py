@@ -36,13 +36,3 @@ gym.register(
         "skrl_cfg_entry_point":     f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
-
-gym.register(
-    id="Nrs-UR10e-Mimic-v0",
-    entry_point="isaaclab.envs:MimicEnv",   # IL 전용 entry_point
-    disable_env_checker=True,
-    kwargs={
-        # Config 파일 경로 (만들어둔 ur10e_spindle_mimic_env_cfg.py)
-        "env_cfg_entry_point": "nrs_lab2.tasks.manager_based.nrs_lab2.config.ur10e_spindle.ur10e_spindle_mimic_env_cfg:UR10eSpindleMimicEnvCfg",
-    },
-)

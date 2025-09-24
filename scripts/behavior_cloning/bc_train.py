@@ -1,114 +1,87 @@
-# SPDX-License-Identifier: BSD-3-Clause
-"""
-Behavior Cloning (BC) training script for UR10e joint trajectory tracking.
-- Loads dataset from HDF5 file
-- Trains a simple MLP policy (obs -> action)
-- Uses supervised MSE loss
-"""
+# bc_train.py (dataset-only BC, IsaacSim 불필요)
 
+import argparse
+import os
 import h5py
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--dataset", type=str, default="/home/eunseop/nrs_lab2/datasets/joint_recording.h5")
+parser.add_argument("--dataset_key", type=str, default="joint_positions")
+parser.add_argument("--device", type=str, default="cuda:0")
+parser.add_argument("--epochs", type=int, default=50)
+parser.add_argument("--batch_size", type=int, default=64)
+parser.add_argument("--lr", type=float, default=1e-3)
+parser.add_argument("--save_path", type=str, default="logs/bc_policy.pth")
+args = parser.parse_args()
 
-# -----------------------------
-# Dataset loader
-# -----------------------------
-class JointBCDataset(Dataset):
-    def __init__(self, hdf5_path: str, dataset_key: str = "joint_positions", obs_type="delta"):
-        with h5py.File(hdf5_path, "r") as f:
-            data = f[dataset_key][:]   # shape: [T, DoF]
-        self.q_targets = torch.tensor(data, dtype=torch.float32)
+# -------------------
+# Load dataset
+# -------------------
+with h5py.File(args.dataset, "r") as f:
+    data = f[args.dataset_key][:]
+print(f"[INFO] Loaded dataset {args.dataset} with shape {data.shape}")
+dataset = torch.tensor(data, dtype=torch.float32)
 
-        # 관측 정의: (q_current, q_target) -> action (q_target or delta)
-        # 여기서는 간단히 delta(q) = q_target - q_current
-        self.obs_type = obs_type
+obs_dim = dataset.shape[1]
+act_dim = dataset.shape[1]   # 여기서는 obs=joint_pos, action=joint_pos (identity imitation)
 
-    def __len__(self):
-        return len(self.q_targets) - 1
-
-    def __getitem__(self, idx):
-        q_current = self.q_targets[idx]
-        q_target = self.q_targets[idx + 1]   # 다음 step을 target으로 둠
-
-        if self.obs_type == "delta":
-            obs = q_current
-            action = q_target - q_current
-        elif self.obs_type == "absolute":
-            obs = q_current
-            action = q_target
-        else:
-            raise ValueError("Unknown obs_type")
-
-        return obs, action
-
-
-# -----------------------------
-# Policy Network (MLP)
-# -----------------------------
-class MLPPolicy(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden_sizes=(128, 128)):
+# -------------------
+# Define Policy
+# -------------------
+class BCPolicy(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden_dim=256):
         super().__init__()
-        layers = []
-        last_dim = obs_dim
-        for h in hidden_sizes:
-            layers.append(nn.Linear(last_dim, h))
-            layers.append(nn.ReLU())
-            last_dim = h
-        layers.append(nn.Linear(last_dim, act_dim))
-        self.net = nn.Sequential(*layers)
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, act_dim),
+        )
 
     def forward(self, x):
         return self.net(x)
 
+policy = BCPolicy(obs_dim, act_dim).to(args.device)
+optimizer = optim.Adam(policy.parameters(), lr=args.lr)
+loss_fn = nn.MSELoss()
 
-# -----------------------------
-# Training loop
-# -----------------------------
-def train_bc(hdf5_path: str, num_epochs=50, batch_size=64, lr=1e-3, obs_type="delta"):
-    # Dataset
-    dataset = JointBCDataset(hdf5_path, "joint_positions", obs_type=obs_type)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+# -------------------
+# Training Loop
+# -------------------
+n_samples = dataset.shape[0]
+indices = np.arange(n_samples)
 
-    obs_dim = dataset[0][0].shape[0]
-    act_dim = dataset[0][1].shape[0]
+for epoch in range(args.epochs):
+    np.random.shuffle(indices)
+    total_loss = 0.0
 
-    # Model + optimizer
-    policy = MLPPolicy(obs_dim, act_dim)
-    optimizer = optim.Adam(policy.parameters(), lr=lr)
-    criterion = nn.MSELoss()
+    for start in range(0, n_samples, args.batch_size):
+        end = start + args.batch_size
+        batch_idx = indices[start:end]
 
-    # Training loop
-    for epoch in range(num_epochs):
-        total_loss = 0
-        for obs, action in dataloader:
-            pred = policy(obs)
-            loss = criterion(pred, action)
+        obs_batch = dataset[batch_idx, :]
+        target_batch = dataset[batch_idx, :]
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        pred = policy(obs_batch.to(args.device))
+        loss = loss_fn(pred, target_batch.to(args.device))
 
-            total_loss += loss.item() * obs.size(0)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-        avg_loss = total_loss / len(dataset)
-        print(f"[Epoch {epoch+1}/{num_epochs}] Loss: {avg_loss:.6f}")
+        total_loss += loss.item()
 
-    # Save model
-    torch.save(policy.state_dict(), "bc_policy.pth")
-    print("✅ Saved BC policy to bc_policy.pth")
+    print(f"[Epoch {epoch+1}/{args.epochs}] Loss: {total_loss:.6f}")
 
-    return policy
-
-
-if __name__ == "__main__":
-    train_bc(
-        hdf5_path="/home/eunseop/nrs_lab2/datasets/joint_recording.h5",
-        num_epochs=50,
-        batch_size=64,
-        lr=1e-3,
-        obs_type="delta"   # "absolute" 로도 가능
-    )
+# -------------------
+# Save Policy
+# -------------------
+os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
+torch.save(policy.state_dict(), args.save_path)
+print(f"[INFO] Saved BC policy to {args.save_path}")
 
