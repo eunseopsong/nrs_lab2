@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-UR10e + Spindle (manager-based): target joint 값 추종 환경
+UR10e + Spindle (manager-based): BC policy(.pth) 기반 target joint 추종 환경
 - Joint-wise weighted error + q4 active tracking + fast convergence reward
 - Termination: 시간 기반 (15초)
 """
@@ -85,12 +85,12 @@ class EventCfg:
         mode="reset",
         params={"position_range": (0.75, 1.25), "velocity_range": (0.0, 0.0)},
     )
-    load_hdf5 = EventTerm(
-        func=local_rewards.load_hdf5_trajectory,
+    # ✅ 기존 load_hdf5 → load_bc_policy 로 교체
+    load_bc = EventTerm(
+        func=local_rewards.load_bc_policy,
         mode="reset",
         params={
-            "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording.h5",
-            "dataset_key": "joint_positions",
+            "file_path": "/home/eunseop/nrs_lab2/datasets/bc_policy.pth",
         },
     )
 
