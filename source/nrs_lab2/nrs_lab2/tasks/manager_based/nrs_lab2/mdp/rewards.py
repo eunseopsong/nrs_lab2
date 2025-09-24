@@ -10,11 +10,13 @@ Reward functions for UR10e + Spindle imitation
 from __future__ import annotations
 import os
 import torch
+import numpy as np      # ✅ 추가
 import matplotlib.pyplot as plt
 from typing import TYPE_CHECKING
 
 # observations.py 에 있는 유틸 불러오기
-from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import get_hdf5_target  
+from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import get_hdf5_target
+from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import get_hdf5_target_future
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -73,19 +75,48 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
     return reward
 
 
+def joint_tracking_reward(env: ManagerBasedRLEnv, weight_pos: float = 1.0, weight_vel: float = 0.1) -> torch.Tensor:
+    """Reward: penalize position + velocity error (uses future target)"""
+    # robot state
+    q = env.scene["robot"].data.joint_pos        # [num_envs, D]
+    qd = env.scene["robot"].data.joint_vel       # [num_envs, D]
+
+    # target state (현재 + 미래 horizon 1 step)
+    targets = get_hdf5_target_future(env, horizon=2)   # [num_envs, 2*D]
+    D = q.shape[1]
+    q_target = targets[:, :D]        # 현재 target
+    q_target_next = targets[:, D:2*D]  # +1 step target
+    qd_target = (q_target_next - q_target) / env.step_dt
+
+    # errors
+    pos_error = torch.norm(q - q_target, dim=-1)
+    vel_error = torch.norm(qd - qd_target, dim=-1)
+
+    reward = -(weight_pos * pos_error + weight_vel * vel_error)
+
+    # Debug print (optional)
+    if env.common_step_counter % 10 == 0:
+        print(f"[Step {env.common_step_counter}] pos_err[0]={pos_error[0].item():.4f}, vel_err[0]={vel_error[0].item():.4f}")
+
+    return reward
+
+
+
 # -------------------
 # Visualization
 # -------------------
+_episode_counter = 0   # ✅ 전역 카운터
+
 def save_joint_tracking_plot(env: ManagerBasedRLEnv):
     """joint target vs current trajectory 시각화"""
-    global _joint_tracking_history
+    global _joint_tracking_history, _episode_counter
 
     if not _joint_tracking_history:
         return
 
     steps, targets, currents = zip(*_joint_tracking_history)
-    targets = torch.tensor(targets)
-    currents = torch.tensor(currents)
+    targets = torch.from_numpy(np.array(targets))   # ✅ 속도 개선
+    currents = torch.from_numpy(np.array(currents))
 
     plt.figure(figsize=(10, 6))
     for j in range(targets.shape[1]):
@@ -101,13 +132,16 @@ def save_joint_tracking_plot(env: ManagerBasedRLEnv):
     # 저장 경로
     save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f"joint_tracking_episode{env.episode_index}.png")
+
+    # ✅ episode_index 대신 전역 카운터 사용
+    save_path = os.path.join(save_dir, f"joint_tracking_episode{_episode_counter}.png")
     plt.savefig(save_path)
     plt.close()
     print(f"[INFO] Saved joint tracking plot to {save_path}")
 
-    # ✅ 다음 episode를 위해 초기화
-    _joint_tracking_history = []
+    _episode_counter += 1        # 다음 episode 번호 증가
+    _joint_tracking_history = [] # 다음 episode를 위해 초기화
+
 
 
 
