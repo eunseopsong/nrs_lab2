@@ -70,15 +70,21 @@ class ActionsCfg:
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        actions   = ObsTerm(func=mdp.last_action)
+        joint_pos   = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
+        joint_vel   = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
+        actions     = ObsTerm(func=mdp.last_action)
+        # ✅ 추가: 미래 target joint
+        target_future = ObsTerm(
+            func=local_obs.get_hdf5_target_future,
+            params={"horizon": 5},   # 필요시 horizon 조정 가능
+        )
 
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = True
 
     policy: PolicyCfg = PolicyCfg()
+
 
 
 # ---------- Events ----------

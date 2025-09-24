@@ -46,3 +46,26 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
     idx = min(int(step / E * T), T - 1)
 
     return _hdf5_trajectory[idx]
+
+# ------------------------------------------------------
+# Observation: future target joints
+# ------------------------------------------------------
+def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
+    global _hdf5_trajectory, _step_idx
+    if _hdf5_trajectory is None:
+        # dummy: [num_envs, horizon * D]
+        D = env.scene["robot"].num_joints
+        return torch.zeros((env.num_envs, horizon * D), device=env.device, dtype=torch.float32)
+
+    T, D = _hdf5_trajectory.shape
+    step = env.episode_length_buf[0].item()
+    E = env.max_episode_length
+    idx = min(int(step / E * T), T - 1)
+
+    # horizon 만큼 future target 뽑기
+    future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
+
+    # shape (horizon, D) → (1, horizon * D) → (num_envs, horizon * D)
+    future_targets = _hdf5_trajectory[future_idx].reshape(1, horizon * D)
+    return future_targets.repeat(env.num_envs, 1)
+
