@@ -75,30 +75,46 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
     return reward
 
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, weight_pos: float = 1.0, weight_vel: float = 0.1) -> torch.Tensor:
-    """Reward: penalize position + velocity error (uses future target)"""
-    # robot state
-    q = env.scene["robot"].data.joint_pos        # [num_envs, D]
-    qd = env.scene["robot"].data.joint_vel       # [num_envs, D]
+# -------------------
+# Joint tracking reward (현재 + 미래 5-step 감쇠 포함)
+# -------------------
+def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.8, horizon: int = 5) -> torch.Tensor:
+    # 현재 조인트 상태
+    currents = env.scene["robot"].data.joint_pos[:, :6]   # [num_envs, D]
+    velocities = env.scene["robot"].data.joint_vel[:, :6] # [num_envs, D]
 
-    # target state (현재 + 미래 horizon 1 step)
-    targets = get_hdf5_target_future(env, horizon=2)   # [num_envs, 2*D]
-    D = q.shape[1]
-    q_target = targets[:, :D]        # 현재 target
-    q_target_next = targets[:, D:2*D]  # +1 step target
-    qd_target = (q_target_next - q_target) / env.step_dt
+    # future target joints (shape: [num_envs, horizon*D])
+    targets_flat = get_hdf5_target_future(env, horizon=horizon)   # [num_envs, horizon*D]
 
-    # errors
-    pos_error = torch.norm(q - q_target, dim=-1)
-    vel_error = torch.norm(qd - qd_target, dim=-1)
+    # reshape → [num_envs, horizon, D]
+    num_envs, flat_dim = targets_flat.shape
+    D = currents.shape[1]
+    targets = targets_flat.view(num_envs, horizon, D)
 
-    reward = -(weight_pos * pos_error + weight_vel * vel_error)
+    total_reward = torch.zeros(num_envs, device=env.device)
 
-    # Debug print (optional)
-    if env.common_step_counter % 10 == 0:
-        print(f"[Step {env.common_step_counter}] pos_err[0]={pos_error[0].item():.4f}, vel_err[0]={vel_error[0].item():.4f}")
+    for k in range(horizon):
+        # horizon step 뒤 target
+        target_k = targets[:, k, :]   # [num_envs, D]
 
-    return reward
+        # 현재 상태와의 오차
+        pos_err = currents - target_k
+        vel_err = velocities  # target 속도 = 0 가정
+
+        # 두 가지 reward 항목 (원래 있던 것들)
+        err_sq = (pos_err**2).sum(dim=-1) + (vel_err**2).sum(dim=-1)
+        err_tanh = torch.tanh(pos_err.abs().sum(dim=-1) + vel_err.abs().sum(dim=-1))
+
+        # 감쇠율 적용
+        weight = gamma**k
+        total_reward += weight * ( -err_sq - err_tanh )
+
+    return total_reward
+
+
+
+
+
 
 
 
