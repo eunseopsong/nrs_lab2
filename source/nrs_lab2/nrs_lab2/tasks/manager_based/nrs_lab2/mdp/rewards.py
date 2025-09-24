@@ -101,10 +101,14 @@ def save_joint_tracking_plot(env: ManagerBasedRLEnv):
     # 저장 경로
     save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f"joint_tracking_step{env.common_step_counter}.png")
+    save_path = os.path.join(save_dir, f"joint_tracking_episode{env.episode_index}.png")
     plt.savefig(save_path)
     plt.close()
     print(f"[INFO] Saved joint tracking plot to {save_path}")
+
+    # ✅ 다음 episode를 위해 초기화
+    _joint_tracking_history = []
+
 
 
 # -------------------
