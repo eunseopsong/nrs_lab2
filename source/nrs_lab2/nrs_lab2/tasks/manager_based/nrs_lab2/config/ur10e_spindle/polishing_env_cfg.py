@@ -9,7 +9,7 @@ from __future__ import annotations
 from isaaclab.utils import configclass
 
 from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.ur10e_spindle_env_cfg import UR10eSpindleEnvCfg
-from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp import rewards as local_rewards
+from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp import observations as local_obs
 from isaaclab.managers import EventTermCfg as EventTerm
 
 
@@ -22,9 +22,9 @@ class PolishingPoseHoldEnvCfg(UR10eSpindleEnvCfg):
         self.sim.render_interval = self.decimation
         self.episode_length_s = 30.0
 
-        # ✅ load .h5 trajectory instead of .pth
+        # ✅ load .h5 trajectory on reset
         self.events.load_hdf5 = EventTerm(
-            func=local_rewards.load_hdf5_trajectory,
+            func=local_obs.load_hdf5_trajectory,
             mode="reset",
             params={
                 "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording.h5",
