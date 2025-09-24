@@ -108,21 +108,20 @@ class EventCfg:
 # ---------- Rewards ----------
 @configclass
 class RewardsCfg:
-    joint_command_error = RewTerm(
-        func=local_rewards.joint_command_error,
+    # joint_command_error = RewTerm(
+    #     func=local_rewards.joint_command_error,
+    #     weight=1.0,
+    # )
+    # joint_command_error_tanh = RewTerm(
+    #     func=local_rewards.joint_command_error_tanh,
+    #     weight=1.0,
+    #     params={"std": 0.5},
+    # )
+    joint_tracking_reward = RewTerm(
+        func=local_rewards.joint_tracking_reward,
         weight=1.0,
+        params={"gamma": 0.7, "horizon": 5},
     )
-    joint_command_error_tanh = RewTerm(
-        func=local_rewards.joint_command_error_tanh,
-        weight=1.0,
-        params={"std": 0.5},
-    )
-    joint_tracking = RewTerm(
-        func=local_rewards.joint_tracking_reward,   # ✅ 새로 추가
-        weight=1.0,
-        params={"weight_pos": 1.0, "weight_vel": 0.1},
-    )
-
 
 # ---------- Terminations ----------
 @configclass
