@@ -81,41 +81,38 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 # -------------------
 # Joint tracking reward (현재 + 미래 5-step 감쇠 포함)
 # -------------------
-def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.8, horizon: int = 5):
-    """미래 target까지 고려한 joint tracking reward (시각화 포함)"""
+import matplotlib
+matplotlib.use("Agg")   # ✅ headless 환경에서도 저장되게 강제
+
+def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.8, horizon: int = 20):
     global _joint_tracking_history
 
-    # 현재 조인트
-    q = env.scene["robot"].data.joint_pos[:, :6]  # [num_envs, 6]
-
-    # ✅ obs_buf 대신 안전하게 함수로 가져오기
-    future_targets = get_hdf5_target_future(env, horizon=horizon)  # [num_envs, horizon*D]
+    q = env.scene["robot"].data.joint_pos[:, :6]
+    future_targets = get_hdf5_target_future(env, horizon=horizon)
 
     num_envs, D = q.shape
     horizon = min(horizon, future_targets.shape[1] // D)
-
     total_reward = torch.zeros(num_envs, device=env.device)
 
     for k in range(horizon):
-        target_k = future_targets[:, k*D:(k+1)*D]  # [num_envs, 6]
+        target_k = future_targets[:, k*D:(k+1)*D]
         diff = q - target_k
-
         rew_pos = -torch.norm(diff, dim=1)
         rew_tanh = torch.tanh(-torch.norm(diff, dim=1))
         total_reward += (gamma ** k) * (rew_pos + rew_tanh)
 
-    # ✅ 시각화 (현재 step 값만 기록)
-    if num_envs == 1:
-        step = env.common_step_counter
-        target_now = future_targets[:, :D][0].detach().cpu().numpy()
-        current_now = q[0].detach().cpu().numpy()
-        _joint_tracking_history.append((step, target_now, current_now))
+    # ✅ 모든 step 기록하도록 수정
+    step = int(env.common_step_counter)
+    target_now = future_targets[:, :D][0].detach().cpu().numpy()
+    current_now = q[0].detach().cpu().numpy()
+    _joint_tracking_history.append((step, target_now, current_now))
 
-    # ✅ episode 끝나면 plot 저장
-    if env.common_step_counter > 0 and env.common_step_counter % int(env.max_episode_length) == 0:
+    # ✅ 100 step마다 강제로 저장
+    if step > 0 and step % 1000 == 0:
         save_joint_tracking_plot(env)
 
     return total_reward
+
 
 
 
