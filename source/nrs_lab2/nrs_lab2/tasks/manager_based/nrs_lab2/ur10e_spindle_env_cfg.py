@@ -31,7 +31,7 @@ local_obs = importlib.import_module("nrs_lab2.nrs_lab2.tasks.manager_based.nrs_l
 local_rewards = importlib.import_module("nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.rewards")
 
 # 로봇 CFG
-from nrs_lab2.nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
+from assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
 
 
 # ---------- Scene ----------
