@@ -32,7 +32,7 @@ local_rewards = importlib.import_module("nrs_lab2.nrs_lab2.tasks.manager_based.n
 
 # 로봇 CFG
 from assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
-
+from assets.assets.sensors.ur10e_contact_sensors import UR10eContactSensorsCfg
 
 # ---------- Scene ----------
 @configclass
