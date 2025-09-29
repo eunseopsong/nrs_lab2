@@ -14,7 +14,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
 # 로봇 설정 (네가 쓰던 cfg를 그대로 사용)
-from nrs_lab2.robots.ur10e_w_spindle import UR10E_W_SPINDLE_HIGH_PD_CFG
+from assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_HIGH_PD_CFG
 
 # --- 조인트 이름(USD의 실제 이름과 일치해야 함) ---
 UR10E_JOINTS: Sequence[str] = [
