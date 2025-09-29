@@ -120,7 +120,7 @@ class RewardsCfg:
     joint_tracking_reward = RewTerm(
         func=local_rewards.joint_tracking_reward,
         weight=1.0,
-        params={"gamma": 0.8, "horizon": 20},
+        params={"gamma": 0.9, "horizon": 10},
     )
 
 # ---------- Terminations ----------
