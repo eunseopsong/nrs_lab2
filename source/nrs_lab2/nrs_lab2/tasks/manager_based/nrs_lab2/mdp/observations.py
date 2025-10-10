@@ -72,29 +72,27 @@ def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Te
 # ------------------------------------------------------
 # ✅ Observation: Contact Sensor Forces
 # ------------------------------------------------------
+
 def get_contact_forces(env, sensor_name="contact_forces"):
     """
-    Returns the mean 3D contact force [Fx, Fy, Fz] or extended 6D (with dummy torques)
-    from the specified ContactSensor in the scene.
-
-    Works with Isaac Lab's current ContactSensor implementation,
-    which exposes data.net_forces_w (num_envs, num_bodies, 3).
+    Returns mean contact wrench [Fx, Fy, Fz, 0, 0, 0] for debugging and RL observation.
     """
-    # ✅ 센서 객체 접근
     sensor = env.scene.sensors[sensor_name]
     data = sensor.data
 
-    # ✅ 접촉력 (world frame)
-    # Shape: (num_envs, num_bodies, 3)
+    # World-frame contact forces: (num_envs, num_bodies, 3)
     forces_w = data.net_forces_w
-
-    # 여러 body가 있는 경우 평균값 사용
     mean_force = torch.mean(forces_w, dim=1)  # (num_envs, 3)
-
-    # IsaacLab 관측 시스템은 벡터 입력을 기대하므로 2D 유지
-    # 토크가 없으므로 dummy 3D zeros 추가하여 6D 형태로 반환
     zeros_torque = torch.zeros_like(mean_force)
-
     contact_wrench = torch.cat([mean_force, zeros_torque], dim=-1)  # (num_envs, 6)
+
+    # ✅ Debug print every few steps (optional)
+    # env.sim.step_counter는 IsaacLab 내부 step counter
+    # step_count = getattr(env.sim, "step_counter", 0)
+    step = int(env.common_step_counter)
+    # if step_count % 1000 == 0:  # every 100 steps
+    if step % 200 == 0:  # every 100 steps
+        fx, fy, fz = mean_force[0].tolist()
+        print(f"[ContactSensor DEBUG] Step {step}: Fx={fx:.3f}, Fy={fy:.3f}, Fz={fz:.3f}")
 
     return contact_wrench

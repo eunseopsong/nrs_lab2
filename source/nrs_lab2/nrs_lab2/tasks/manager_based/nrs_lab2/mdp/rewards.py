@@ -78,13 +78,11 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 # -------------------
 # Joint tracking reward (현재 + 미래 5-step 감쇠 포함, 시각화 연동)
 # -------------------
-# -------------------
-# Joint tracking reward (현재 + 미래 5-step 감쇠 포함)
-# -------------------
+
 import matplotlib
 matplotlib.use("Agg")   # ✅ headless 환경에서도 저장되게 강제
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 10):
+def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.7, horizon: int = 5):
     global _joint_tracking_history
 
     q = env.scene["robot"].data.joint_pos[:, :6]
@@ -107,7 +105,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
     current_now = q[0].detach().cpu().numpy()
     _joint_tracking_history.append((step, target_now, current_now))
 
-    # ✅ 100 step마다 강제로 저장
+    # ✅ 1000 step마다 강제로 저장
     if step > 0 and step % 1000 == 0:
         save_joint_tracking_plot(env)
 
