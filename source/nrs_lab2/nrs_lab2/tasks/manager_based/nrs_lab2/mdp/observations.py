@@ -72,13 +72,29 @@ def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Te
 # ------------------------------------------------------
 # ✅ Observation: Contact Sensor Forces
 # ------------------------------------------------------
-def get_contact_forces(scene, env_ids=None, sensor_name="contact_forces"):
-    """Return average contact force (Fx, Fy, Fz, Tx, Ty, Tz) from the specified contact sensor."""
-    sensor = scene[sensor_name]
-    # net_forces_w: [num_envs, num_contacts, 3]
-    forces = sensor.data.net_forces_w
-    torques = sensor.data.net_torques_w
-    # 평균값 계산
-    mean_force = torch.mean(forces, dim=1)
-    mean_torque = torch.mean(torques, dim=1)
-    return torch.cat([mean_force, mean_torque], dim=-1)
+def get_contact_forces(env, sensor_name="contact_forces"):
+    """
+    Returns the mean 3D contact force [Fx, Fy, Fz] or extended 6D (with dummy torques)
+    from the specified ContactSensor in the scene.
+
+    Works with Isaac Lab's current ContactSensor implementation,
+    which exposes data.net_forces_w (num_envs, num_bodies, 3).
+    """
+    # ✅ 센서 객체 접근
+    sensor = env.scene.sensors[sensor_name]
+    data = sensor.data
+
+    # ✅ 접촉력 (world frame)
+    # Shape: (num_envs, num_bodies, 3)
+    forces_w = data.net_forces_w
+
+    # 여러 body가 있는 경우 평균값 사용
+    mean_force = torch.mean(forces_w, dim=1)  # (num_envs, 3)
+
+    # IsaacLab 관측 시스템은 벡터 입력을 기대하므로 2D 유지
+    # 토크가 없으므로 dummy 3D zeros 추가하여 6D 형태로 반환
+    zeros_torque = torch.zeros_like(mean_force)
+
+    contact_wrench = torch.cat([mean_force, zeros_torque], dim=-1)  # (num_envs, 6)
+
+    return contact_wrench
