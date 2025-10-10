@@ -69,3 +69,22 @@ def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Te
     future_targets = _hdf5_trajectory[future_idx].reshape(1, horizon * D)
     return future_targets.repeat(env.num_envs, 1)
 
+# ------------------------------------------------------
+# ✅ Observation: Contact Sensor Forces
+# ------------------------------------------------------
+def get_contact_forces(env: ManagerBasedRLEnv, sensor_name: str = "wrist_contact") -> torch.Tensor:
+    """
+    Contact sensor에서 힘(force)과 토크(torque) 데이터를 읽어서 반환.
+    - 각 환경마다 [Fx, Fy, Fz, Tx, Ty, Tz] 형태의 벡터를 반환.
+    - Isaac Lab의 contact sensor는 body_forces_w 속성에 접촉 정보가 들어 있음.
+    """
+    try:
+        sensor = env.scene.sensors[sensor_name]
+    except KeyError:
+        raise RuntimeError(f"[ERROR] Contact sensor '{sensor_name}' not found in env.scene.sensors")
+
+    # contact forces: [num_envs, max_contacts, 6] (force + torque)
+    # 각 환경에서 여러 contact가 발생할 수 있으므로 평균을 취함
+    forces = sensor.data.body_forces_w  # [N_envs, N_contacts, 6]
+    mean_force = torch.mean(forces, dim=1)  # [N_envs, 6]
+    return mean_force
