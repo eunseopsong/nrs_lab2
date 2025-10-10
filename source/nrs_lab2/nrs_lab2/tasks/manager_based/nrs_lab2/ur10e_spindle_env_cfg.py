@@ -1,12 +1,39 @@
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers
+# (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
 # SPDX-License-Identifier: BSD-3-Clause
+# -----------------------------------------------------------------------------
+# Title: UR10e + Spindle (Environment with Contact Sensor)
+# Author: Seungjun Song (NRS Lab)
+# -----------------------------------------------------------------------------
 """
-UR10e + Spindle (manager-based): target joint 값 추종 환경
-- Joint command error + tanh shaped reward
-- Termination: trajectory 끝 or 시간 기반
+Manager-based Isaac Lab environment for the UR10e robot equipped with a spindle tool.
+
+This environment tracks target joint trajectories and adds a Contact Sensor to the
+end-effector to measure force / torque feedback.
+
+Key features:
+- Joint trajectory tracking with tanh-shaped reward.  
+- Trajectory or time-based termination.  
+- End-effector contact force sensor integration for feedback and RL observation.  
+- Fully compatible with Isaac Lab’s manager-based MDP structure.
+
+Example usage:
+.. code-block:: bash
+
+    ./isaaclab.sh -p nrs_lab2/tasks/manager_based/ur10e_spindle_env_cfg.py --enable_cameras
 """
+
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 
 from __future__ import annotations
 from dataclasses import MISSING
+import importlib
+import torch
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -21,20 +48,26 @@ from isaaclab.managers import (
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.sensors import ContactSensorCfg  # ✅ 센서 클래스 직접 임포트
 
-# Reach MDP 유틸
+# Reach MDP utilities
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
-# ✅ 내 모듈을 확실히 importlib로 불러오기
-import importlib
-local_obs = importlib.import_module("nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations")
-local_rewards = importlib.import_module("nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.rewards")
+# Local modules (dynamically import for robustness)
+local_obs = importlib.import_module(
+    "nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations"
+)
+local_rewards = importlib.import_module(
+    "nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.rewards"
+)
 
-# 로봇 CFG
+# Robot and sensor assets
 from assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
-from assets.assets.sensors.ur10e_contact_sensors import UR10eContactSensorsCfg
 
-# ---------- Scene ----------
+# -----------------------------------------------------------------------------
+# Scene Configuration
+# -----------------------------------------------------------------------------
+
 @configclass
 class SpindleSceneCfg(InteractiveSceneCfg):
     ground = AssetBaseCfg(
@@ -57,36 +90,44 @@ class SpindleSceneCfg(InteractiveSceneCfg):
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
-    # ✅ Contact Sensor 등록
-    # wrist_contact = UR10eContactSensorsCfg.wrist_contact
+
+    # Contact sensor (replicated per env)
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+    )
 
 
+# -----------------------------------------------------------------------------
+# Actions
+# -----------------------------------------------------------------------------
 
-
-# ---------- Actions ----------
 @configclass
 class ActionsCfg:
     arm_action: ActionTerm = MISSING
 
+# -----------------------------------------------------------------------------
+# Observations
+# -----------------------------------------------------------------------------
 
-# ---------- Observations ----------
 @configclass
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
-        joint_pos   = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        joint_vel   = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        actions     = ObsTerm(func=mdp.last_action)
-        # ✅ 추가: 미래 target joint
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
+        actions    = ObsTerm(func=mdp.last_action)
         target_future = ObsTerm(
             func=local_obs.get_hdf5_target_future,
-            params={"horizon": 5},   # 필요시 horizon 조정 가능
+            params={"horizon": 5},
         )
 
-        # ✅ 추가: contact sensor 데이터 (평균 Fx, Fy, Fz, Tx, Ty, Tz)
+        # ✅ Contact Sensor 데이터 추가 (평균 Fx,Fy,Fz,Tx,Ty,Tz)
         # contact_forces = ObsTerm(
         #     func=local_obs.get_contact_forces,
-        #     params={"sensor_name": "wrist_contact"},
+        #     params={"sensor_name": "contact_forces"},
         # )
 
         def __post_init__(self):
@@ -95,10 +136,10 @@ class ObservationsCfg:
 
     policy: PolicyCfg = PolicyCfg()
 
+# -----------------------------------------------------------------------------
+# Events
+# -----------------------------------------------------------------------------
 
-
-
-# ---------- Events ----------
 @configclass
 class EventCfg:
     reset_robot_joints = EventTerm(
@@ -107,41 +148,35 @@ class EventCfg:
         params={"position_range": (0.75, 1.25), "velocity_range": (0.0, 0.0)},
     )
     load_hdf5 = EventTerm(
-        func=local_obs.load_hdf5_trajectory,   # ✅ observations.py에서 가져오기
+        func=local_obs.load_hdf5_trajectory,
         mode="reset",
-        params={
-            "trajectory": None,
-        },
+        params={"trajectory": None},
     )
 
+# -----------------------------------------------------------------------------
+# Rewards
+# -----------------------------------------------------------------------------
 
-
-# ---------- Rewards ----------
 @configclass
 class RewardsCfg:
-    # joint_command_error = RewTerm(
-    #     func=local_rewards.joint_command_error,
-    #     weight=1.0,
-    # )
-    # joint_command_error_tanh = RewTerm(
-    #     func=local_rewards.joint_command_error_tanh,
-    #     weight=1.0,
-    #     params={"std": 0.5},
-    # )
     joint_tracking_reward = RewTerm(
         func=local_rewards.joint_tracking_reward,
         weight=1.0,
         params={"gamma": 0.9, "horizon": 10},
     )
 
-# ---------- Terminations ----------
+# -----------------------------------------------------------------------------
+# Terminations
+# -----------------------------------------------------------------------------
+
 @configclass
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # reached_end = DoneTerm(func=local_rewards.reached_end)
 
+# -----------------------------------------------------------------------------
+# Environment Configuration
+# -----------------------------------------------------------------------------
 
-# ---------- EnvCfg ----------
 @configclass
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=16, env_spacing=2.5)
@@ -158,10 +193,13 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 30.0
 
-        # 로봇 세팅
+        # Robot configuration
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        # action 세팅
+        # Action configuration
         self.actions.arm_action = mdp.JointPositionActionCfg(
-            asset_name="robot", joint_names=[".*"], scale=0.2, use_default_offset=True
+            asset_name="robot",
+            joint_names=[".*"],
+            scale=0.2,
+            use_default_offset=True,
         )
