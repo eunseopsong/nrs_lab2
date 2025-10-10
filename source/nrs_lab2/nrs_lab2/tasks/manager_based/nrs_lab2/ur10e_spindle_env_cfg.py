@@ -116,25 +116,37 @@ class ActionsCfg:
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        actions    = ObsTerm(func=mdp.last_action)
+        # 기본 joint 관측
+        joint_pos = ObsTerm(
+            func=mdp.joint_pos_rel,
+            noise=Unoise(n_min=-0.01, n_max=0.01)
+        )
+        joint_vel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            noise=Unoise(n_min=-0.01, n_max=0.01)
+        )
+        actions = ObsTerm(func=mdp.last_action)
+
+        # HDF5 기반 target 예측 (trajectory 기반)
         target_future = ObsTerm(
             func=local_obs.get_hdf5_target_future,
             params={"horizon": 5},
         )
 
-        # ✅ Contact Sensor 데이터 추가 (평균 Fx,Fy,Fz,Tx,Ty,Tz)
-        # contact_forces = ObsTerm(
-        #     func=local_obs.get_contact_forces,
-        #     params={"sensor_name": "contact_forces"},
-        # )
+        # ✅ Contact Sensor 데이터 추가 (평균 Fx, Fy, Fz, Tx, Ty, Tz)
+        contact_forces = ObsTerm(
+            func=local_obs.get_contact_forces,
+            params={"sensor_name": "contact_forces"},  # scene.contact_forces 이름과 동일해야 함
+        )
 
         def __post_init__(self):
             self.enable_corruption = True
-            # self.concatenate_terms = True
+            self.concatenate_terms = True  # ✅ 모든 관측값을 하나의 벡터로 결합
+            # contact sensor도 자동으로 병합되어 정책 입력으로 들어감
 
+    # RL 정책에서 사용할 observation 그룹
     policy: PolicyCfg = PolicyCfg()
+
 
 # -----------------------------------------------------------------------------
 # Events
