@@ -57,6 +57,10 @@ class SpindleSceneCfg(InteractiveSceneCfg):
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
+    # ✅ Contact Sensor 등록
+    # wrist_contact = UR10eContactSensorsCfg.wrist_contact
+
+
 
 
 # ---------- Actions ----------
@@ -79,11 +83,18 @@ class ObservationsCfg:
             params={"horizon": 5},   # 필요시 horizon 조정 가능
         )
 
+        # ✅ 추가: contact sensor 데이터 (평균 Fx, Fy, Fz, Tx, Ty, Tz)
+        # contact_forces = ObsTerm(
+        #     func=local_obs.get_contact_forces,
+        #     params={"sensor_name": "wrist_contact"},
+        # )
+
         def __post_init__(self):
             self.enable_corruption = True
-            self.concatenate_terms = True
+            # self.concatenate_terms = True
 
     policy: PolicyCfg = PolicyCfg()
+
 
 
 
