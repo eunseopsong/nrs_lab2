@@ -119,11 +119,11 @@ class ObservationsCfg:
         # 기본 joint 관측
         joint_pos = ObsTerm(
             func=mdp.joint_pos_rel,
-            noise=Unoise(n_min=-0.01, n_max=0.01)
+            noise=Unoise(n_min=-0.01, n_max=0.01),
         )
         joint_vel = ObsTerm(
             func=mdp.joint_vel_rel,
-            noise=Unoise(n_min=-0.01, n_max=0.01)
+            noise=Unoise(n_min=-0.01, n_max=0.01),
         )
         actions = ObsTerm(func=mdp.last_action)
 
@@ -133,19 +133,21 @@ class ObservationsCfg:
             params={"horizon": 5},
         )
 
-        # ✅ Contact Sensor 데이터 추가 (평균 Fx, Fy, Fz, Tx, Ty, Tz)
+        # ✅ Contact Sensor 데이터 추가 (평균 Fx, Fy, Fz + dummy Tx,Ty,Tz)
         contact_forces = ObsTerm(
             func=local_obs.get_contact_forces,
             params={"sensor_name": "contact_forces"},  # scene.contact_forces 이름과 동일해야 함
         )
 
         def __post_init__(self):
+            # 관측 오염(노이즈) 허용
             self.enable_corruption = True
-            self.concatenate_terms = True  # ✅ 모든 관측값을 하나의 벡터로 결합
-            # contact sensor도 자동으로 병합되어 정책 입력으로 들어감
+            # ✅ 모든 관측값을 하나의 벡터로 결합 (policy input으로 전달)
+            self.concatenate_terms = True
 
     # RL 정책에서 사용할 observation 그룹
     policy: PolicyCfg = PolicyCfg()
+
 
 
 # -----------------------------------------------------------------------------
