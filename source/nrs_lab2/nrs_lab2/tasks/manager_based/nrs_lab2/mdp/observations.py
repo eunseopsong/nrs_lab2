@@ -87,10 +87,7 @@ def get_contact_forces(env, sensor_name="contact_forces"):
     contact_wrench = torch.cat([mean_force, zeros_torque], dim=-1)  # (num_envs, 6)
 
     # ✅ Debug print every few steps (optional)
-    # env.sim.step_counter는 IsaacLab 내부 step counter
-    # step_count = getattr(env.sim, "step_counter", 0)
     step = int(env.common_step_counter)
-    # if step_count % 1000 == 0:  # every 100 steps
     if step % 200 == 0:  # every 100 steps
         fx, fy, fz = mean_force[0].tolist()
         print(f"[ContactSensor DEBUG] Step {step}: Fx={fx:.3f}, Fy={fy:.3f}, Fz={fz:.3f}")
