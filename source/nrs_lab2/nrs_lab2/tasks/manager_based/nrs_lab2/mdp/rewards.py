@@ -111,6 +111,52 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.7, horizon: i
 
     return total_reward
 
+# -------------------
+# Contact Force reward
+# -------------------
+
+
+def contact_force_reward(env: ManagerBasedRLEnv,
+                         sensor_name: str = "contact_forces",
+                         fz_min: float = 5.0,
+                         fz_max: float = 50.0,
+                         margin: float = 2.0,
+                         weight: float = 1.0) -> torch.Tensor:
+    """
+    Reward for maintaining end-effector normal force (Fz) within [fz_min, fz_max].
+
+    Args:
+        env: Isaac Lab ManagerBasedRLEnv environment.
+        sensor_name: Contact sensor name (default: 'contact_forces').
+        fz_min, fz_max: desired Fz range [N].
+        margin: tolerance margin for smooth tanh decay outside range.
+        weight: scaling factor for the reward.
+
+    Returns:
+        torch.Tensor(num_envs,) : per-env scalar reward.
+    """
+    # ✅ Contact sensor 읽기
+    sensor = env.scene.sensors[sensor_name]
+    forces_w = sensor.data.net_forces_w  # (num_envs, num_bodies, 3)
+
+    # 여러 rigid body가 있으면 평균 Fz 사용
+    mean_force = torch.mean(forces_w, dim=1)  # (num_envs, 3)
+    fz = mean_force[:, 2]  # Fz (z축 성분)
+
+    # ✅ 보상 계산: Fz가 [fz_min, fz_max] 범위 내이면 +1, 아니면 0~음수
+    # Smooth transition using tanh kernel
+    lower_smooth = torch.tanh((fz - fz_min) / margin)
+    upper_smooth = torch.tanh((fz_max - fz) / margin)
+    reward_raw = 0.5 * (lower_smooth + upper_smooth)
+
+    # scale and clip
+    reward = weight * torch.clamp(reward_raw, 0.0, 1.0)
+
+    # ✅ 디버깅 출력 (100 step마다)
+    if env.common_step_counter % 100 == 0:
+        print(f"[ContactReward DEBUG] Step {env.common_step_counter}: Fz={fz[0].item():.3f}, Reward={reward[0].item():.3f}")
+
+    return reward
 
 
 

@@ -176,7 +176,12 @@ class RewardsCfg:
     joint_tracking_reward = RewTerm(
         func=local_rewards.joint_tracking_reward,
         weight=1.0,
-        params={"gamma": 0.7, "horizon": 5},
+        params={"gamma": 0.9, "horizon": 10},
+    )
+    contact_force_reward = RewTerm(
+        func=local_rewards.contact_force_reward,
+        weight=0.5,  # joint reward와 균형
+        params={"sensor_name": "contact_forces", "fz_min": 5.0, "fz_max": 50.0},
     )
 
 # -----------------------------------------------------------------------------
