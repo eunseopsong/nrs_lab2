@@ -98,7 +98,20 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         history_length=10,
         debug_vis=True,
     )
-
+    # ✅ 카메라 센서 추가
+    camera = UsdCameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/Robot/base_link/camera_sensor",
+        update_period=0.0,
+        width=640,
+        height=480,
+        fov=70.0,
+        position=(0.0, 0.0, 0.1),
+        orientation=(0.0, 0.0, 0.0, 1.0),
+        rgb=True,
+        depth=False,
+        seg=False,
+        debug_vis=True,
+    )
 
 # -----------------------------------------------------------------------------
 # Actions
