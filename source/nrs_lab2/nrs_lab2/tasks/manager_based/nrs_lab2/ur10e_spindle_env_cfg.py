@@ -48,7 +48,7 @@ from isaaclab.managers import (
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-from isaaclab.sensors import ContactSensorCfg, UsdCameraCfg   # ✅ Camera sensor 추가
+from isaaclab.sensors import ContactSensorCfg, CameraCfg  # ✅ Camera sensor 추가
 
 # Reach MDP utilities
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
@@ -98,20 +98,21 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         history_length=10,
         debug_vis=True,
     )
+
     # ✅ 카메라 센서 추가
-    camera = UsdCameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Robot/base_link/camera_sensor",
-        update_period=0.0,
-        width=640,
+    camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link/camera_sensors",
+        update_period=0.1,
         height=480,
-        fov=70.0,
-        position=(0.0, 0.0, 0.1),
-        orientation=(0.0, 0.0, 0.0, 1.0),
-        rgb=True,
-        depth=False,
-        seg=False,
-        debug_vis=True,
+        width=640,
+        data_types=["rgb", "distance_to_image_plane"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
+        ),
+        offset=CameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
     )
+
+
 
 # -----------------------------------------------------------------------------
 # Actions
