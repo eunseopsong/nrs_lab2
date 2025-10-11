@@ -82,7 +82,7 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 import matplotlib
 matplotlib.use("Agg")   # ✅ headless 환경에서도 저장되게 강제
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.7, horizon: int = 5):
+def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 10):
     global _joint_tracking_history
 
     q = env.scene["robot"].data.joint_pos[:, :6]
@@ -119,7 +119,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.7, horizon: i
 def contact_force_reward(env: ManagerBasedRLEnv,
                          sensor_name: str = "contact_forces",
                          fz_min: float = 5.0,
-                         fz_max: float = 50.0,
+                         fz_max: float = 15.0,
                          margin: float = 2.0,
                          weight: float = 1.0) -> torch.Tensor:
     """
@@ -153,7 +153,7 @@ def contact_force_reward(env: ManagerBasedRLEnv,
     reward = weight * torch.clamp(reward_raw, 0.0, 1.0)
 
     # ✅ 디버깅 출력 (100 step마다)
-    if env.common_step_counter % 100 == 0:
+    if env.common_step_counter % 1000 == 0:
         print(f"[ContactReward DEBUG] Step {env.common_step_counter}: Fz={fz[0].item():.3f}, Reward={reward[0].item():.3f}")
 
     return reward
