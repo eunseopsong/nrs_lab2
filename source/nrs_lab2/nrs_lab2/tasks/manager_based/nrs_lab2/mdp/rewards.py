@@ -173,9 +173,6 @@ def save_joint_tracking_plot(env: ManagerBasedRLEnv):
     if not _joint_tracking_history:
         return
 
-    import numpy as np
-    import matplotlib.pyplot as plt
-
     steps, targets, currents = zip(*_joint_tracking_history)
     targets = torch.from_numpy(np.array(targets))   # ✅ 속도 개선
     currents = torch.from_numpy(np.array(currents))
