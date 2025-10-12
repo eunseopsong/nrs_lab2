@@ -158,7 +158,44 @@ def contact_force_reward(env: ManagerBasedRLEnv,
 
     return reward
 
+# -----------------------------------------------------------------------------
+# Camera Distance Reward
+# -----------------------------------------------------------------------------
 
+def camera_distance_reward(env, target_distance: float = 0.185, sigma: float = 0.02):
+    """
+    Reward for maintaining camera distance near the spindle length (≈0.185m).
+
+    Args:
+        env: ManagerBasedRLEnv
+        target_distance (float): desired mean camera distance (m)
+        sigma (float): Gaussian width (how sharply reward decreases)
+    """
+    # camera sensor 데이터 접근
+    camera_data = env.scene["camera"].data.output["distance_to_image_plane"]
+
+    # [num_envs, H, W] → 평균 거리로 축소
+    d_mean = torch.mean(camera_data.view(env.num_envs, -1), dim=1)
+
+    # 거리 오차
+    error = torch.abs(d_mean - target_distance)
+
+    # Gaussian kernel 기반 보상
+    reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
+
+    # 디버깅 출력 (매 100 step마다)
+    if env.common_step_counter % 100 == 0:
+        print(f"[CameraReward DEBUG] Step {env.common_step_counter}: mean_dist={d_mean[0].item():.4f} m, "
+              f"target={target_distance:.3f}, reward={reward[0].item():.4f}")
+
+        # 결과 저장 (선택)
+        save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"camera_distance_step{env.common_step_counter}.txt")
+        with open(save_path, "w") as f:
+            f.write(f"Step {env.common_step_counter}, mean_dist={d_mean[0].item():.6f}, reward={reward[0].item():.6f}\n")
+
+    return reward
 
 
 # -------------------
