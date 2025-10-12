@@ -33,6 +33,7 @@ from __future__ import annotations
 from dataclasses import MISSING
 import importlib
 import torch
+import math
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
@@ -99,20 +100,30 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         debug_vis=True,
     )
 
-    # ✅ 카메라 센서 추가
+    # -----------------------------------------------------------------------------
+    # Camera Sensor Configuration
+    # -----------------------------------------------------------------------------
+    # 오일러 각(-180, 0, -180)을 쿼터니언(ros convention)으로 직접 계산한 값:
+    # qx, qy, qz, qw = (0, 0, 0, 1)와 동일한 방향이지만 180° 회전 상태이므로 약간 다름.
+    # 실제 변환 결과: (x=0, y=0, z=1, w=0) (즉, 180도 yaw)
     camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link/camera_sensors",
         update_period=0.1,
         height=480,
         width=640,
-        data_types=["rgb", "distance_to_image_plane"],
+        data_types=["rgb", "distance_to_image_plane", "normals"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
+            focal_length=18.14756,
+            focus_distance=40.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1.0e5),
         ),
-        offset=CameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.0, -0.1, 0.0),
+            rot=(0.0, 0.0, 1.0, 0.0),  # ← ✅ 함수 대신 직접 쿼터니언 기입
+            convention="ros",
+        ),
     )
-
-
 
 # -----------------------------------------------------------------------------
 # Actions
@@ -153,6 +164,18 @@ class ObservationsCfg:
             params={"sensor_name": "contact_forces"},  # scene.contact_forces 이름과 동일해야 함
         )
 
+        # ✅ Camera distance 추가
+        camera_distance = ObsTerm(
+            func=local_obs.get_camera_distance,
+            params={"sensor_name": "camera"},
+        )
+
+        camera_normals = ObsTerm(
+            func=local_obs.get_camera_normals,
+            params={"sensor_name": "camera"},
+        )
+
+
         def __post_init__(self):
             # 관측 오염(노이즈) 허용
             self.enable_corruption = True
@@ -187,17 +210,33 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
+    # (1) Joint tracking reward
     joint_tracking_reward = RewTerm(
         func=local_rewards.joint_tracking_reward,
         weight=0.9,
         params={"gamma": 0.9, "horizon": 10},
     )
+
+    # (2) Contact stability reward
     contact_force_reward = RewTerm(
         func=local_rewards.contact_force_reward,
-        weight=0.1,  # joint reward와 균형
-        params={"sensor_name": "contact_forces", "fz_min": 5.0, "fz_max": 20.0},
+        weight=0.05,
+        params={
+            "sensor_name": "contact_forces",
+            "fz_min": 5.0,
+            "fz_max": 20.0,
+        },
     )
 
+    # (3) ✅ Camera distance reward (스핀들 길이 유지)
+    camera_distance_reward = RewTerm(
+        func=local_rewards.camera_distance_reward,
+        weight=0.05,
+        params={
+            "target_distance": 0.185,  # spindle 길이
+            "sigma": 0.035,             # 거리 허용 오차 범위 (±2cm)
+        },
+    )
 
 # -----------------------------------------------------------------------------
 # Terminations
