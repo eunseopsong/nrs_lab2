@@ -1,11 +1,40 @@
 seed: 42
 
+############# For MLP models #############
+# Models are instantiated using skrl's model instantiator utility
+# https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
+# models:
+#   separate: False
+#   policy:  # see gaussian_model parameters
+#     class: GaussianMixin
+#     clip_actions: False
+#     clip_log_std: True
+#     min_log_std: -20.0
+#     max_log_std: 2.0
+#     initial_log_std: 0.0
+#     network:
+#       - name: net
+#         input: STATES
+#         layers: [32, 32]
+#         activations: elu
+#     output: ACTIONS
+#   value:  # see deterministic_model parameters
+#     class: DeterministicMixin
+#     clip_actions: False
+#     network:
+#       - name: net
+#         input: STATES
+#         layers: [32, 32]
+#         activations: elu
+#     output: ONE
 
+
+############# For LSTM models #############
 # Models are instantiated using skrl's model instantiator utility
 # https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
 models:
   separate: False
-  policy:  # see gaussian_model parameters
+  policy:
     class: GaussianMixin
     clip_actions: False
     clip_log_std: True
@@ -13,20 +42,30 @@ models:
     max_log_std: 2.0
     initial_log_std: 0.0
     network:
-      - name: net
+      - name: lstm_net
         input: STATES
-        layers: [32, 32]
+        recurrent: True
+        rnn_type: LSTM
+        rnn_layers: 1
+        layers: [64]               # ✅ 반드시 추가
         activations: elu
     output: ACTIONS
-  value:  # see deterministic_model parameters
+
+  value:
     class: DeterministicMixin
     clip_actions: False
     network:
-      - name: net
+      - name: lstm_net
         input: STATES
-        layers: [32, 32]
+        recurrent: True
+        rnn_type: LSTM
+        rnn_layers: 1
+        layers: [64]               # ✅ 반드시 추가
         activations: elu
     output: ONE
+
+
+
 
 
 # Rollout memory
