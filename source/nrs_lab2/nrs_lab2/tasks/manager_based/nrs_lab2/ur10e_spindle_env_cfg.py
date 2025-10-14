@@ -81,16 +81,16 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=2500.0),
     )
-    workpiece = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Workpiece",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/eunseop/isaac/isaac_save/concave_surface.usd",
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
-    )
+    # workpiece = AssetBaseCfg(
+    #     prim_path="{ENV_REGEX_NS}/Workpiece",
+    #     spawn=sim_utils.UsdFileCfg(
+    #         usd_path="/home/eunseop/isaac/isaac_save/concave_surface.usd",
+    #     ),
+    #     init_state=AssetBaseCfg.InitialStateCfg(
+    #         pos=(0.0, 0.0, 0.0),
+    #         rot=(1.0, 0.0, 0.0, 0.0),
+    #     ),
+    # )
 
     # Contact sensor (replicated per env)
     contact_forces = ContactSensorCfg(
@@ -213,30 +213,30 @@ class RewardsCfg:
     # (1) Joint tracking reward
     joint_tracking_reward = RewTerm(
         func=local_rewards.joint_tracking_reward,
-        weight=0.9,
+        weight=1.0,
         params={"gamma": 0.9, "horizon": 10},
     )
 
     # (2) Contact stability reward
-    contact_force_reward = RewTerm(
-        func=local_rewards.contact_force_reward,
-        weight=0.05,
-        params={
-            "sensor_name": "contact_forces",
-            "fz_min": 5.0,
-            "fz_max": 20.0,
-        },
-    )
+    # contact_force_reward = RewTerm(
+    #     func=local_rewards.contact_force_reward,
+    #     weight=0.05,
+    #     params={
+    #         "sensor_name": "contact_forces",
+    #         "fz_min": 5.0,
+    #         "fz_max": 20.0,
+    #     },
+    # )
 
-    # (3) ✅ Camera distance reward (스핀들 길이 유지)
-    camera_distance_reward = RewTerm(
-        func=local_rewards.camera_distance_reward,
-        weight=0.05,
-        params={
-            "target_distance": 0.185,  # spindle 길이
-            "sigma": 0.035,             # 거리 허용 오차 범위 (±2cm)
-        },
-    )
+    # # (3) ✅ Camera distance reward (스핀들 길이 유지)
+    # camera_distance_reward = RewTerm(
+    #     func=local_rewards.camera_distance_reward,
+    #     weight=0.05,
+    #     params={
+    #         "target_distance": 0.185,  # spindle 길이
+    #         "sigma": 0.035,             # 거리 허용 오차 범위 (±2cm)
+    #     },
+    # )
 
 # -----------------------------------------------------------------------------
 # Terminations
@@ -252,7 +252,7 @@ class TerminationsCfg:
 
 @configclass
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=16, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=32, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
