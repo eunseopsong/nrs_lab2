@@ -258,3 +258,147 @@ def reached_end(env: ManagerBasedRLEnv, command_name=None, asset_cfg=None) -> to
     T = _hdf5_trajectory.shape[0]
     return torch.tensor(env.common_step_counter >= (T - 1),
                         dtype=torch.bool, device=env.device).repeat(env.num_envs)
+
+
+
+# -----------------------------------------------------------------------------
+# Behavior Cloning Model as Target Trajectory (Reset + Step 연동 버전)
+# -----------------------------------------------------------------------------
+import importlib
+import torch
+import numpy as np
+import h5py
+
+# ✅ LSTMPolicy 동적 import
+try:
+    lstm_module = importlib.import_module(
+        "nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.lstm"
+    )
+    LSTMPolicy = getattr(lstm_module, "LSTMPolicy")
+    print("[INFO] ✅ Successfully imported LSTMPolicy from mdp.lstm")
+except Exception as e:
+    print(f"[WARNING] ❌ Failed to import LSTMPolicy: {e}")
+    LSTMPolicy = None
+
+
+# ===============================================================
+# ① Episode 시작 시 모델 로드 및 trajectory 생성
+# ===============================================================
+def load_bc_trajectory(env, env_ids, seq_len: int = 10):
+    """
+    Called at each environment reset (episode start).
+    Loads model_bc.pt and generates full joint trajectory to follow.
+    Compatible with Isaac Lab's EventManager.
+    """
+    print("\n[BC Loader] 🔄 Reloading model_bc.pt for new episode...")
+
+    model_path = "/home/eunseop/nrs_lab2/datasets/model_bc.pt"
+    data_path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
+
+    if LSTMPolicy is None:
+        print("[ERROR] LSTMPolicy import failed.")
+        return
+
+    # (1) Load BC model
+    env.bc_model = LSTMPolicy(input_dim=6, hidden_dim=128, output_dim=6)
+    env.bc_model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    env.bc_model.eval()
+    print(f"[BC Loader] ✅ Loaded BC model from {model_path}")
+
+    # (2) Load dataset
+    import h5py
+    with h5py.File(data_path, "r") as f:
+        joint_data = np.array(f["joint_positions"])
+    print(f"[BC Loader] ✅ Loaded dataset: {joint_data.shape}")
+
+    # (3) Generate predicted trajectory
+    seq, preds = [], []
+    for t in range(len(joint_data)):
+        seq.append(joint_data[t])
+        if len(seq) > seq_len:
+            seq.pop(0)
+        if len(seq) == seq_len:
+            x = torch.tensor(np.array(seq), dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                y = env.bc_model(x)
+            preds.append(y.squeeze(0).numpy())
+        else:
+            preds.append(np.zeros(6))
+
+    env._bc_full_target = np.array(preds)
+    env._bc_step_counter = 0
+    print(f"[BC Loader] ✅ Generated BC target trajectory: {env._bc_full_target.shape}")
+
+
+# -----------------------------------------------------------------------------
+# Behavior Cloning trajectory tracking reward (scaled over full episode)
+# -----------------------------------------------------------------------------
+import torch
+import numpy as np
+import h5py
+
+def update_bc_target(env, env_ids=None):
+    import torch, h5py, numpy as np
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+
+    # ------------------------------
+    # (1) 시뮬레이션 파라미터
+    # ------------------------------
+    dt = getattr(env.sim, "dt", 1.0 / 60.0)
+    decimation = getattr(env, "decimation", 2)
+    episode_length_s = 60.0                          # ✅ 60초로 고정
+    env.cfg.episode_length_s = episode_length_s
+    episode_len_steps = int(episode_length_s / (dt * decimation))  # 시뮬 step 수 (예: 1800)
+
+    # ------------------------------
+    # (2) Trajectory 로드
+    # ------------------------------
+    if not hasattr(env, "_bc_full_target"):
+        data_path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
+        with h5py.File(data_path, "r") as f:
+            joint_data = np.array(f["joint_positions"])
+        env._bc_full_target = joint_data
+        env._bc_step_counter = 0
+        print(f"[INFO] Loaded HDF5 trajectory of shape {env._bc_full_target.shape}")
+
+    # ✅ 타입 강제 변환 (numpy → torch)
+    if isinstance(env._bc_full_target, np.ndarray):
+        env._bc_full_target = torch.tensor(env._bc_full_target, dtype=torch.float32, device=env.device)
+
+    total_traj_len = env._bc_full_target.shape[0]  # 전체 데이터 길이 (예: 5758)
+
+    # ------------------------------
+    # (3) Trajectory index scaling (핵심 수정)
+    # ------------------------------
+    current_step = env._bc_step_counter
+    # ✅ step(0~episode_len_steps)을 dataset index(0~total_traj_len)로 선형 매핑
+    scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
+    scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
+
+    # ------------------------------
+    # (4) Reward 계산
+    # ------------------------------
+    q_target = env._bc_full_target[scaled_idx].unsqueeze(0)  # (1,6)
+    q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
+
+    diff = q_current - q_target
+    error = torch.norm(diff, dim=1)
+    sigma = 0.05
+    reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
+
+    # ------------------------------
+    # (5) Counter 및 출력
+    # ------------------------------
+    env._bc_step_counter += 1
+    if env._bc_step_counter % 100 == 0 or scaled_idx == total_traj_len - 1:
+        percent = (scaled_idx / total_traj_len) * 100
+        print(f"[BC Tracking] Dataset index {scaled_idx+1}/{total_traj_len} ({percent:.1f}%), mean error={error.mean():.4f}")
+
+    # 에피소드가 끝나면 step 카운터 리셋
+    if env._bc_step_counter >= episode_len_steps:
+        env._bc_step_counter = 0
+        print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
+
+    return reward
