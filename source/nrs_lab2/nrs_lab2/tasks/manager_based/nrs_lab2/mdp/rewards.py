@@ -381,30 +381,56 @@ def update_bc_target(env, env_ids=None):
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
 
     # ------------------------------
-    # (4) Reward 계산 (Exponential 형태 유지)
+    # (4) Improved Exponential Reward (Enhanced for q2, q4)
     # ------------------------------
+    # ✅ Trajectory scaling 보정
+    ratio = total_traj_len / episode_len_steps
+    scaled_idx = int(current_step * ratio)
+    scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
+
+    # ✅ 현재 상태 및 타겟 로드
     q_target = env._bc_full_target[scaled_idx].unsqueeze(0)
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
+    qdot_current = env.scene["robot"].data.joint_vel[env_ids, :6]
 
-    joint_weights = torch.tensor([1.2, 1.0, 1.0, 0.8, 0.8, 0.6], device=env.device)
-    diff = (q_current - q_target) * joint_weights
-
-    error = torch.norm(diff, dim=1)
-    sigma = torch.clamp(0.3 * error.mean().detach(), 0.05, 0.25)
-    reward_exp = torch.exp(- (error ** 2) / (2 * sigma ** 2))
-
-    # 방향성 강화 (Cosine similarity)
-    shaping = 0.1 * torch.cosine_similarity(q_current, q_target, dim=1)
-
-    # smoothness 보상
-    if hasattr(env, "_prev_q_current"):
-        dq = (q_current - env._prev_q_current).norm(dim=1)
-        smooth = torch.exp(-dq)
+    # ✅ velocity target (finite difference)
+    if scaled_idx < env._bc_full_target.shape[0] - 1:
+        qdot_target = (env._bc_full_target[scaled_idx+1] - env._bc_full_target[scaled_idx]) / (dt * decimation)
     else:
-        smooth = torch.ones_like(error, device=env.device)
-    env._prev_q_current = q_current.clone()
+        qdot_target = torch.zeros_like(q_current)
 
-    reward = torch.clamp(reward_exp * smooth + shaping, 0.0, 1.0)
+    # ✅ joint별 weight (q2, q4 보상 강화)
+    joint_weights = torch.tensor([1.0, 1.4, 1.0, 1.3, 1.0, 1.0], device=env.device)
+
+    # ✅ joint별 sigma (큰 joint 오차에 대해 gradient 유지)
+    sigma_base = torch.tensor([0.2, 0.35, 0.2, 0.35, 0.2, 0.2], device=env.device)
+    kappa = 2.5
+
+    # ✅ position / velocity error
+    diff_pos = (q_current - q_target) * joint_weights
+    diff_vel = qdot_current - qdot_target
+
+    # ✅ per-joint exponential kernel (position)
+    error_joint = torch.abs(diff_pos)
+    reward_joint = torch.exp(- (error_joint ** 2) / (2 * sigma_base ** 2)) / (1 + kappa * error_joint)
+    reward_pos = reward_joint.mean(dim=1)
+
+    # ✅ velocity-based reward (보조항)
+    error_vel = torch.norm(diff_vel, dim=1)
+    sigma_vel = 2 * sigma_base.mean()  # velocity는 완화된 sigma 사용
+    reward_vel = torch.exp(- (error_vel ** 2) / (2 * sigma_vel ** 2))
+
+    # ✅ combined reward (velocity 비중 증가)
+    reward = 0.6 * reward_pos + 0.4 * reward_vel
+
+    # ✅ temporal smoothness
+    alpha = 0.8
+    if hasattr(env, "_prev_reward"):
+        reward = alpha * env._prev_reward + (1 - alpha) * reward
+    env._prev_reward = reward.clone()
+
+    reward = torch.clamp(reward, 0.0, 1.0)
+
 
 
     # ------------------------------
