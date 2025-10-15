@@ -16,13 +16,21 @@ from isaaclab.managers import EventTermCfg as EventTerm
 @configclass
 class PolishingPoseHoldEnvCfg(UR10eSpindleEnvCfg):
     def __post_init__(self):
-        super().__post_init__()
+        super().__post_init__()  # 🔹 상속받은 기본 설정 먼저 초기화
+
+        # 🔹 SimulationCfg 조정
+        self.sim.dt = 1.0 / 60.0
+        self.sim.physics_dt = 1.0 / 60.0
+        self.sim.substeps = 1
+        self.sim.use_gpu_pipeline = True
+
+        # 🔹 기타 환경 설정
         self.actions.arm_action.scale = 0.2
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 30.0
+        self.episode_length_s = 60.0
 
-        # ✅ load .h5 trajectory on reset
+        # 🔹 HDF5 trajectory 불러오기 이벤트 설정
         self.events.load_hdf5 = EventTerm(
             func=local_obs.load_hdf5_trajectory,
             mode="reset",
