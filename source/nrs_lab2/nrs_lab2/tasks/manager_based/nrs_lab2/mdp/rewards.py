@@ -423,6 +423,9 @@ def update_bc_target(env, env_ids=None):
     # ✅ combined reward (velocity 비중 증가)
     reward = 0.6 * reward_pos + 0.4 * reward_vel
 
+    # ✅ position error norm (for logging)
+    error = torch.norm(diff_pos, dim=1)
+
     # ✅ temporal smoothness
     alpha = 0.8
     if hasattr(env, "_prev_reward"):
@@ -430,6 +433,7 @@ def update_bc_target(env, env_ids=None):
     env._prev_reward = reward.clone()
 
     reward = torch.clamp(reward, 0.0, 1.0)
+
 
 
 
