@@ -383,10 +383,12 @@ def update_bc_target(env, env_ids=None):
     # ------------------------------
     # (4) Improved Exponential Reward (Enhanced for q2, q4)
     # ------------------------------
-    # ✅ Trajectory scaling 보정
-    ratio = total_traj_len / episode_len_steps
-    scaled_idx = int(current_step * ratio)
+    # ✅ Trajectory scaling 보정 (정확도 향상)
+    ratio = (total_traj_len - 1) / (episode_len_steps - 1)
+    scaled_idx = int(round(current_step * ratio))
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
+
+
 
     # ✅ 현재 상태 및 타겟 로드
     q_target = env._bc_full_target[scaled_idx].unsqueeze(0)
@@ -432,7 +434,9 @@ def update_bc_target(env, env_ids=None):
         reward = alpha * env._prev_reward + (1 - alpha) * reward
     env._prev_reward = reward.clone()
 
-    reward = torch.clamp(reward, 0.0, 1.0)
+    reward = torch.clamp(reward, 1e-5, 1.0)
+    reward = torch.log1p(10 * reward) / torch.log1p(torch.tensor(10.0, device=reward.device))
+
 
 
 
