@@ -383,13 +383,29 @@ def update_bc_target(env, env_ids=None):
     # ------------------------------
     # (4) Reward 계산 (Exponential 형태 유지)
     # ------------------------------
-    q_target = env._bc_full_target[scaled_idx].unsqueeze(0)  # (1,6)
+    q_target = env._bc_full_target[scaled_idx].unsqueeze(0)
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
 
-    diff = q_current - q_target
+    joint_weights = torch.tensor([1.2, 1.0, 1.0, 0.8, 0.8, 0.6], device=env.device)
+    diff = (q_current - q_target) * joint_weights
+
     error = torch.norm(diff, dim=1)
-    sigma = 0.05
-    reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
+    sigma = torch.clamp(0.3 * error.mean().detach(), 0.05, 0.25)
+    reward_exp = torch.exp(- (error ** 2) / (2 * sigma ** 2))
+
+    # 방향성 강화 (Cosine similarity)
+    shaping = 0.1 * torch.cosine_similarity(q_current, q_target, dim=1)
+
+    # smoothness 보상
+    if hasattr(env, "_prev_q_current"):
+        dq = (q_current - env._prev_q_current).norm(dim=1)
+        smooth = torch.exp(-dq)
+    else:
+        smooth = torch.ones_like(error, device=env.device)
+    env._prev_q_current = q_current.clone()
+
+    reward = torch.clamp(reward_exp * smooth + shaping, 0.0, 1.0)
+
 
     # ------------------------------
     # (5) 기록 (env 0 기준)
