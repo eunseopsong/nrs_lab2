@@ -339,6 +339,10 @@ import h5py
 
 def update_bc_target(env, env_ids=None):
     import torch, h5py, numpy as np
+    from matplotlib import pyplot as plt
+    import os
+
+    global _joint_tracking_history, _episode_counter
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
@@ -370,15 +374,14 @@ def update_bc_target(env, env_ids=None):
     total_traj_len = env._bc_full_target.shape[0]  # 전체 데이터 길이 (예: 5758)
 
     # ------------------------------
-    # (3) Trajectory index scaling (핵심 수정)
+    # (3) Trajectory index scaling
     # ------------------------------
     current_step = env._bc_step_counter
-    # ✅ step(0~episode_len_steps)을 dataset index(0~total_traj_len)로 선형 매핑
     scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
 
     # ------------------------------
-    # (4) Reward 계산
+    # (4) Reward 계산 (Exponential 형태 유지)
     # ------------------------------
     q_target = env._bc_full_target[scaled_idx].unsqueeze(0)  # (1,6)
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
@@ -389,16 +392,57 @@ def update_bc_target(env, env_ids=None):
     reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
 
     # ------------------------------
-    # (5) Counter 및 출력
+    # (5) 기록 (env 0 기준)
+    # ------------------------------
+    step = int(env._bc_step_counter)
+    _joint_tracking_history.append(
+        (step, q_target[0].detach().cpu().numpy(), q_current[0].detach().cpu().numpy())
+    )
+
+    # ------------------------------
+    # (6) Counter 및 출력
     # ------------------------------
     env._bc_step_counter += 1
     if env._bc_step_counter % 100 == 0 or scaled_idx == total_traj_len - 1:
         percent = (scaled_idx / total_traj_len) * 100
         print(f"[BC Tracking] Dataset index {scaled_idx+1}/{total_traj_len} ({percent:.1f}%), mean error={error.mean():.4f}")
 
-    # 에피소드가 끝나면 step 카운터 리셋
+    # ------------------------------
+    # (7) 에피소드 종료 시 시각화 및 리셋
+    # ------------------------------
     if env._bc_step_counter >= episode_len_steps:
-        env._bc_step_counter = 0
         print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
+
+        # ✅ 시각화 저장
+        if _joint_tracking_history:
+            steps, targets, currents = zip(*_joint_tracking_history)
+            targets = np.array(targets)
+            currents = np.array(currents)
+
+            plt.figure(figsize=(10, 6))
+            colors = plt.cm.tab10.colors
+            for j in range(targets.shape[1]):
+                color = colors[j % len(colors)]
+                plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=color, linewidth=1.2)
+                plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=color, linewidth=2.0)
+
+            plt.xlabel("Step")
+            plt.ylabel("Joint Value (rad)")
+            plt.title("Joint Tracking (Target vs Current)")
+            plt.legend(ncol=2, fontsize=8)
+            plt.grid(True)
+
+            save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"bc_tracking_episode{_episode_counter}.png")
+            plt.savefig(save_path)
+            plt.close()
+            print(f"[INFO] Saved BC tracking plot to {save_path}")
+
+            _episode_counter += 1
+            _joint_tracking_history.clear()
+
+        # ✅ 리셋
+        env._bc_step_counter = 0
 
     return reward
