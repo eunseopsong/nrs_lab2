@@ -374,7 +374,7 @@ def update_bc_target(env, env_ids=None):
     # ---------------------------------------------------------
     # (3) Step indexing with linear interpolation
     # ---------------------------------------------------------
-    HORIZON = 40
+    HORIZON = 20
     GAMMA = 0.9
     SIGMA = 0.3
 
@@ -441,7 +441,7 @@ def update_bc_target(env, env_ids=None):
     # ---------------------------------------------------------
     # (7) Logging
     # ---------------------------------------------------------
-    if current_step % 100 == 0:
+    if current_step % 10 == 0:
         mean_r = total_reward.mean().item()
         print(f"[BC Tracking v13.1] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
 
