@@ -385,11 +385,17 @@ def update_bc_target(env, env_ids=None):
     # 실수 인덱스 계산
     scaled_idx_f = (current_step / episode_len_steps) * total_traj_len
     idx0 = int(torch.floor(torch.tensor(scaled_idx_f)))
-    idx1 = min(idx0 + 1, total_traj_len - 1)
+    idx0 = min(idx0, total_traj_len - 2)  # ✅ 안전 클램프
+    idx1 = idx0 + 1
     alpha = scaled_idx_f - idx0  # 보간 비율 (0~1)
+
+    # ✅ 디버깅 출력 복원
+    if current_step % 100 == 0 or current_step < 10:
+        print(f"[DEBUG] Step {current_step:04d}/{episode_len_steps} | scaled_idx_f={scaled_idx_f:.2f}, idx0={idx0}, idx1={idx1}, α={alpha:.3f}")
 
     # 선형 보간된 현재 target joint
     q_target_interp = (1 - alpha) * env._bc_full_target[idx0] + alpha * env._bc_full_target[idx1]
+
 
     # ---------------------------------------------------------
     # (4) Future target sampling (interpolated sequence)
