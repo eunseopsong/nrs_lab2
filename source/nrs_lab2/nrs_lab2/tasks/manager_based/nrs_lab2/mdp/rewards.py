@@ -380,64 +380,56 @@ def update_bc_target(env, env_ids=None):
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
 
     # ------------------------------
-    # (4) Improved Reward v7 - Hybrid (L2 + tanh) + Exponential Horizon
+    # (Improved Reward v8 - Hybrid exponential + tanh shaping with discount normalization)
     # ------------------------------
     HORIZON = 10
     GAMMA = 0.9
-    SIGMA = 0.5
-    JOINT_WEIGHTS = torch.tensor([1.0, 1.0, 1.0, 0.8, 0.6, 0.6], device=env.device)
+    SIGMA = 1.0        # reward sensitivity (너무 작으면 reward 소멸)
+    TANH_WEIGHT = 0.3  # tanh 항의 soft blending weight
 
-    # ✅ 현재 joint 상태
+    # ✅ 현재 step 및 상태
+    current_step = env._bc_step_counter
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
 
-    # ✅ normalization
+    # ✅ normalization (if available)
     if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
         q_current = (q_current - env._bc_mean) / env._bc_std
 
-    # ✅ 시간 스케일링
-    ratio = total_traj_len / episode_len_steps
-    current_step = env._bc_step_counter
-    idx_f = torch.tensor(current_step * ratio, device=env.device)
-    idx0 = torch.floor(idx_f).long().clamp(0, total_traj_len - 1)
-
-    # ✅ Hybrid reward 계산
+    # ✅ discounted hybrid reward 계산
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
+    total_traj_len = env._bc_full_target.shape[0]
+
+    t = current_step / episode_len_steps
+    idx_f = torch.tensor(t * (total_traj_len - 1), device=env.device)
+    idx0 = torch.floor(idx_f).long()
+
     for k in range(HORIZON):
         idx_h = torch.clamp(idx0 + k, max=total_traj_len - 1)
         q_target_h = env._bc_full_target[idx_h].unsqueeze(0).to(env.device)
-
         if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
             q_target_h = (q_target_h - env._bc_mean) / env._bc_std
 
-        # weighted joint diff
         diff = q_current - q_target_h
-        weighted_error = torch.sqrt(torch.sum(JOINT_WEIGHTS * (diff ** 2), dim=1))
+        error_norm = torch.norm(diff, dim=1)
 
-        # ✅ (1) L2 기반 error
-        error_l2 = weighted_error
+        # ✅ hybrid error shaping
+        hybrid_error = (1 - TANH_WEIGHT) * error_norm + TANH_WEIGHT * torch.tanh(error_norm / SIGMA)
 
-        # ✅ (2) tanh 기반 shaping error
-        error_tanh = torch.tanh(weighted_error / SIGMA)
-
-        # ✅ 결합 (L2 + tanh)
-        joint_error = error_l2 + error_tanh
-
-        # ✅ exponential kernel
-        reward_k = torch.exp(- (joint_error ** 2) / (2 * SIGMA ** 2))
-
-        # ✅ discounted horizon sum
+        reward_k = torch.exp(- (hybrid_error ** 2) / (2 * SIGMA ** 2))
         total_reward += (GAMMA ** k) * reward_k
 
-    reward = total_reward / HORIZON
+    # ✅ normalization term (prevent discount collapse)
+    Z = (1 - GAMMA ** HORIZON)
+    reward = total_reward / Z
 
-    # ✅ Smoothness penalty (acceleration)
+    # ✅ smoothness penalty
     if hasattr(env, "_prev_q"):
         accel_penalty = torch.norm(q_current - 2 * env._prev_q + env._prev_q2, dim=1)
-        reward *= torch.exp(-0.3 * accel_penalty)
+        reward *= torch.exp(-0.5 * accel_penalty)
     env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
     env._prev_q = q_current.clone()
 
-    # ✅ Temporal smoothing
+    # ✅ temporal smoothing
     alpha = 0.5
     if hasattr(env, "_prev_reward"):
         reward = alpha * env._prev_reward + (1 - alpha) * reward
@@ -445,10 +437,11 @@ def update_bc_target(env, env_ids=None):
 
     reward = torch.clamp(reward, 0.0, 1.0)
 
-    # ✅ Logging
+    # ✅ logging
     if current_step % 100 == 0:
-        print(f"[BC Tracking v7] Step {current_step:05d} | "
-              f"H={HORIZON}, γ={GAMMA}, σ={SIGMA}, mean_r={reward.mean().item():.4f}")
+        print(f"[BC Tracking v8] Step {current_step:05d} | "
+              f"H={HORIZON}, γ={GAMMA}, σ={SIGMA}, w={TANH_WEIGHT}, mean_r={reward.mean().item():.4f}")
+
 
 
 
