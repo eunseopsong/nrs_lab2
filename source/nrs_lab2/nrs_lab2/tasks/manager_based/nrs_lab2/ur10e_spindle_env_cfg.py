@@ -216,11 +216,11 @@ class EventCfg:
 @configclass
 class RewardsCfg:
     # (1) Joint tracking reward
-    # joint_tracking_reward = RewTerm(
-    #     func=local_rewards.joint_tracking_reward,
-    #     weight=1.0,
-    #     params={"gamma": 0.9, "horizon": 10},
-    # )
+    joint_tracking_reward = RewTerm(
+        func=local_rewards.joint_tracking_reward,
+        weight=1.0,
+        params={"gamma": 0.9, "horizon": 10},
+    )
 
     # (2) Contact stability reward
     # contact_force_reward = RewTerm(
@@ -252,10 +252,10 @@ class RewardsCfg:
     #     },
     # )
 
-    bc_tracking_reward = RewTerm(
-        func=local_rewards.update_bc_target,
-        weight=1.0,
-    )
+    # bc_tracking_reward = RewTerm(
+    #     func=local_rewards.update_bc_target,
+    #     weight=1.0,
+    # )
 
 
 
@@ -273,7 +273,7 @@ class TerminationsCfg:
 
 @configclass
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=32, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1024, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
