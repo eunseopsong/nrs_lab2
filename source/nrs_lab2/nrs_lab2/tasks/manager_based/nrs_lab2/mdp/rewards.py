@@ -331,7 +331,7 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (v13.2: interpolation + per-episode visualization)
+# Behavior Cloning trajectory tracking reward (v13.3: sim_time-based indexing + per-episode visualization)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
@@ -360,7 +360,6 @@ def update_bc_target(env, env_ids=None):
     decimation = getattr(env, "decimation", 1)
     episode_length_s = 60.0
     env.cfg.episode_length_s = episode_length_s
-    episode_len_steps = int(episode_length_s / (dt * decimation))
 
     # ---------------------------------------------------------
     # (2) Trajectory loading
@@ -379,26 +378,27 @@ def update_bc_target(env, env_ids=None):
     total_traj_len = env._bc_full_target.shape[0]
 
     # ---------------------------------------------------------
-    # (3) Step indexing with linear interpolation
+    # (3) Step indexing with sim_time-based interpolation
     # ---------------------------------------------------------
     HORIZON = 20
     GAMMA = 0.9
     SIGMA = 0.3
 
-    current_step = env._bc_step_counter
+    # 실제 시뮬레이션 시간
+    sim_time = getattr(env, "sim_time", env._bc_step_counter * dt)
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
 
-    # 실수 인덱스 계산
-    scaled_idx_f = (current_step / episode_len_steps) * total_traj_len
+    # 실수 인덱스 계산 (실제 시뮬 시간 기반)
+    scaled_idx_f = (sim_time / episode_length_s) * total_traj_len
     idx0 = int(torch.floor(torch.tensor(scaled_idx_f)))
-    idx0 = min(idx0, total_traj_len - 2)  # ✅ 안전 클램프
+    idx0 = min(idx0, total_traj_len - 2)
     idx1 = idx0 + 1
-    alpha = scaled_idx_f - idx0  # 보간 비율 (0~1)
+    alpha = scaled_idx_f - idx0
 
     # ✅ 디버깅 출력
-    if current_step % 10 == 0 or current_step < 10:
-        print(f"[DEBUG] Step {current_step:04d}/{episode_len_steps} | scaled_idx_f={scaled_idx_f:.2f}, idx0={idx0}, idx1={idx1}, α={alpha:.3f}")
+    if env._bc_step_counter % 100 == 0 or env._bc_step_counter < 10:
+        print(f"[DEBUG] Step {env._bc_step_counter:04d} | t={sim_time:.3f}s | scaled_idx_f={scaled_idx_f:.2f}, idx0={idx0}, idx1={idx1}, α={alpha:.3f}")
 
     # 선형 보간된 현재 target joint
     q_target_interp = (1 - alpha) * env._bc_full_target[idx0] + alpha * env._bc_full_target[idx1]
@@ -406,18 +406,15 @@ def update_bc_target(env, env_ids=None):
     # ---------------------------------------------------------
     # (4) Future target sampling (interpolated sequence)
     # ---------------------------------------------------------
-    D = q_current.shape[1]
     q_target_future = []
-
     for k in range(HORIZON):
         scaled_f_k = scaled_idx_f + k
         idx0_k = int(torch.floor(torch.tensor(scaled_f_k)))
-        idx0_k = min(idx0_k, total_traj_len - 2)  # ✅ out-of-bound 방지
+        idx0_k = min(idx0_k, total_traj_len - 2)
         idx1_k = idx0_k + 1
         alpha_k = scaled_f_k - idx0_k
         q_interp_k = (1 - alpha_k) * env._bc_full_target[idx0_k] + alpha_k * env._bc_full_target[idx1_k]
         q_target_future.append(q_interp_k.unsqueeze(0))
-
     q_target_future = torch.cat(q_target_future, dim=0)
 
     # ---------------------------------------------------------
@@ -427,12 +424,9 @@ def update_bc_target(env, env_ids=None):
         q_target_h = q_target_future[k]
         diff = q_current - q_target_h
         error = torch.norm(diff, dim=1)
-
         rew_linear = -error
         rew_tanh = 1 - torch.tanh(error / SIGMA)
-
         total_reward += (GAMMA ** k) * (rew_linear + rew_tanh)
-
     total_reward /= HORIZON
 
     # ---------------------------------------------------------
@@ -446,22 +440,21 @@ def update_bc_target(env, env_ids=None):
     # ---------------------------------------------------------
     # (7) Logging
     # ---------------------------------------------------------
-    if current_step % 10 == 0:
+    if env._bc_step_counter % 10 == 0:
         mean_r = total_reward.mean().item()
-        print(f"[BC Tracking v13.2] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
-
+        print(f"[BC Tracking v13.3] Step {env._bc_step_counter:05d} | t={sim_time:.2f}s | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
         _joint_tracking_history.append((
-            current_step,
+            env._bc_step_counter,
             q_target_interp.detach().cpu().numpy(),
             q_current[0].detach().cpu().numpy()
         ))
 
     # ---------------------------------------------------------
-    # (8) Episode end & visualization (매 episode마다 저장)
+    # (8) Episode end & visualization (60초 기준)
     # ---------------------------------------------------------
     env._bc_step_counter += 1
-    if env._bc_step_counter >= episode_len_steps:
-        print(f"[BC Loader] 🔁 Episode {_episode_counter} finished — saving joint tracking plot...")
+    if sim_time >= episode_length_s:
+        print(f"[BC Loader] 🔁 Episode {_episode_counter} finished (t={sim_time:.2f}s) — saving joint tracking plot...")
 
         if len(_joint_tracking_history) > 0:
             steps, targets, currents = zip(*_joint_tracking_history)
@@ -487,7 +480,7 @@ def update_bc_target(env, env_ids=None):
             plt.close()
             print(f"[INFO] ✅ Saved BC tracking plot → {os.path.abspath(save_path)}")
 
-        # 카운터 및 버퍼 초기화
+        # Reset for next episode
         _episode_counter += 1
         _joint_tracking_history.clear()
         env._bc_step_counter = 0
