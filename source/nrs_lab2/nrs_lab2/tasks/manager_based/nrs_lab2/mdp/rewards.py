@@ -331,7 +331,7 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (v13.1: interpolation + visualization)
+# Behavior Cloning trajectory tracking reward (v13.2: interpolation + per-episode visualization)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
@@ -341,7 +341,14 @@ from matplotlib import pyplot as plt
 
 
 def update_bc_target(env, env_ids=None):
+    # ---------------------------------------------------------
+    # (0) Global buffer initialization
+    # ---------------------------------------------------------
     global _joint_tracking_history, _episode_counter
+    if "_joint_tracking_history" not in globals():
+        _joint_tracking_history = []
+    if "_episode_counter" not in globals():
+        _episode_counter = 0
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
@@ -349,8 +356,8 @@ def update_bc_target(env, env_ids=None):
     # ---------------------------------------------------------
     # (1) Simulation parameters
     # ---------------------------------------------------------
-    dt = getattr(env.sim, "dt", 1.0 / 60.0)
-    decimation = getattr(env, "decimation", 2)
+    dt = getattr(env.sim, "dt", 1.0 / 120.0)
+    decimation = getattr(env, "decimation", 1)
     episode_length_s = 60.0
     env.cfg.episode_length_s = episode_length_s
     episode_len_steps = int(episode_length_s / (dt * decimation))
@@ -389,13 +396,12 @@ def update_bc_target(env, env_ids=None):
     idx1 = idx0 + 1
     alpha = scaled_idx_f - idx0  # 보간 비율 (0~1)
 
-    # ✅ 디버깅 출력 복원
-    if current_step % 100 == 0 or current_step < 10:
+    # ✅ 디버깅 출력
+    if current_step % 10 == 0 or current_step < 10:
         print(f"[DEBUG] Step {current_step:04d}/{episode_len_steps} | scaled_idx_f={scaled_idx_f:.2f}, idx0={idx0}, idx1={idx1}, α={alpha:.3f}")
 
     # 선형 보간된 현재 target joint
     q_target_interp = (1 - alpha) * env._bc_full_target[idx0] + alpha * env._bc_full_target[idx1]
-
 
     # ---------------------------------------------------------
     # (4) Future target sampling (interpolated sequence)
@@ -413,7 +419,6 @@ def update_bc_target(env, env_ids=None):
         q_target_future.append(q_interp_k.unsqueeze(0))
 
     q_target_future = torch.cat(q_target_future, dim=0)
-
 
     # ---------------------------------------------------------
     # (5) Reward accumulation
@@ -443,7 +448,7 @@ def update_bc_target(env, env_ids=None):
     # ---------------------------------------------------------
     if current_step % 10 == 0:
         mean_r = total_reward.mean().item()
-        print(f"[BC Tracking v13.1] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
+        print(f"[BC Tracking v13.2] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
 
         _joint_tracking_history.append((
             current_step,
@@ -452,14 +457,13 @@ def update_bc_target(env, env_ids=None):
         ))
 
     # ---------------------------------------------------------
-    # (8) Episode end & visualization
+    # (8) Episode end & visualization (매 episode마다 저장)
     # ---------------------------------------------------------
     env._bc_step_counter += 1
     if env._bc_step_counter >= episode_len_steps:
-        print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
+        print(f"[BC Loader] 🔁 Episode {_episode_counter} finished — saving joint tracking plot...")
 
-        # ✅ 시각화 (Target vs Current)
-        if _joint_tracking_history:
+        if len(_joint_tracking_history) > 0:
             steps, targets, currents = zip(*_joint_tracking_history)
             targets = np.array(targets)
             currents = np.array(currents)
@@ -479,13 +483,13 @@ def update_bc_target(env, env_ids=None):
             save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
             os.makedirs(save_dir, exist_ok=True)
             save_path = os.path.join(save_dir, f"bc_tracking_episode{_episode_counter}.png")
-            plt.savefig(save_path)
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
             plt.close()
-            print(f"[INFO] Saved BC tracking plot to {save_path}")
+            print(f"[INFO] ✅ Saved BC tracking plot → {os.path.abspath(save_path)}")
 
-            _episode_counter += 1
-            _joint_tracking_history.clear()
-
+        # 카운터 및 버퍼 초기화
+        _episode_counter += 1
+        _joint_tracking_history.clear()
         env._bc_step_counter = 0
 
     return total_reward
