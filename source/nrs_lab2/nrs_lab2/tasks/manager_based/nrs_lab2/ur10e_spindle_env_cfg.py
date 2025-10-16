@@ -281,11 +281,11 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
 
     def __post_init__(self):
-        self.decimation = 2
+        self.decimation = 1
         self.sim.render_interval = self.decimation
         self.episode_length_s = 60.0
         self.viewer.eye = (3.5, 3.5, 3.5)
-        self.sim.dt = 1.0 / 60.0
+        self.sim.dt = 1.0 / 120.0
 
         # Robot configuration
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
