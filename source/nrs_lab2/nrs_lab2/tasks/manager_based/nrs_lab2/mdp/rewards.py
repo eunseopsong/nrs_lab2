@@ -331,7 +331,7 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (v12 - horizon indexing aligned)
+# Behavior Cloning trajectory tracking reward (v12-debug)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
@@ -371,9 +371,9 @@ def update_bc_target(env, env_ids=None):
     total_traj_len = env._bc_full_target.shape[0]
 
     # ---------------------------------------------------------
-    # (3) Step indexing & future slicing (joint_tracking_reward와 동일)
+    # (3) Step indexing & future slicing
     # ---------------------------------------------------------
-    HORIZON = 10
+    HORIZON = 40
     GAMMA = 0.9
     SIGMA = 0.3
 
@@ -384,6 +384,10 @@ def update_bc_target(env, env_ids=None):
     # 현재 step을 trajectory 길이에 맞게 정규화
     scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
+
+    # 🔍 디버깅: scaled_idx 출력
+    if current_step % 100 == 0 or current_step < 10:
+        print(f"[DEBUG] Step {current_step:04d} / {episode_len_steps} → scaled_idx = {scaled_idx:04d}/{total_traj_len}")
 
     # ✅ future slice 구간 확보 (연속 horizon)
     D = q_current.shape[1]
@@ -398,10 +402,10 @@ def update_bc_target(env, env_ids=None):
         )
 
     # ---------------------------------------------------------
-    # (4) Reward accumulation (linear + tanh, discounted sum)
+    # (4) Reward accumulation
     # ---------------------------------------------------------
     for k in range(HORIZON):
-        q_target_h = q_target_future[k]  # (6,)
+        q_target_h = q_target_future[k]
         diff = q_current - q_target_h
         error = torch.norm(diff, dim=1)
 
@@ -423,9 +427,8 @@ def update_bc_target(env, env_ids=None):
     # ---------------------------------------------------------
     if current_step % 100 == 0:
         mean_r = total_reward.mean().item()
-        print(f"[BC Tracking v12] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
+        print(f"[BC Tracking v12-debug] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
 
-        # 기록용 (env 0)
         _joint_tracking_history.append((
             current_step,
             q_target_future[0].detach().cpu().numpy(),
@@ -433,39 +436,12 @@ def update_bc_target(env, env_ids=None):
         ))
 
     # ---------------------------------------------------------
-    # (7) Episode reset 및 시각화
+    # (7) Episode end & visualization
     # ---------------------------------------------------------
     env._bc_step_counter += 1
     if env._bc_step_counter >= episode_len_steps:
         print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
-
-        if _joint_tracking_history:
-            steps, targets, currents = zip(*_joint_tracking_history)
-            targets = np.array(targets)
-            currents = np.array(currents)
-
-            plt.figure(figsize=(10, 6))
-            colors = plt.cm.tab10.colors
-            for j in range(targets.shape[1]):
-                c = colors[j % len(colors)]
-                plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=c, linewidth=1.2)
-                plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=c, linewidth=2.0)
-            plt.xlabel("Step")
-            plt.ylabel("Joint (rad)")
-            plt.title("Joint Tracking (Target vs Current)")
-            plt.legend(ncol=2, fontsize=8)
-            plt.grid(True)
-
-            save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
-            os.makedirs(save_dir, exist_ok=True)
-            save_path = os.path.join(save_dir, f"bc_tracking_episode{_episode_counter}.png")
-            plt.savefig(save_path)
-            plt.close()
-            print(f"[INFO] Saved BC tracking plot to {save_path}")
-
-            _episode_counter += 1
-            _joint_tracking_history.clear()
-
+        ...
         env._bc_step_counter = 0
 
     return total_reward
