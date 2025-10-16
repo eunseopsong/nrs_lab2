@@ -331,13 +331,14 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (v12-debug)
+# Behavior Cloning trajectory tracking reward (v13.1: interpolation + visualization)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
 import h5py
 import os
 from matplotlib import pyplot as plt
+
 
 def update_bc_target(env, env_ids=None):
     global _joint_tracking_history, _episode_counter
@@ -371,7 +372,7 @@ def update_bc_target(env, env_ids=None):
     total_traj_len = env._bc_full_target.shape[0]
 
     # ---------------------------------------------------------
-    # (3) Step indexing & future slicing
+    # (3) Step indexing with linear interpolation
     # ---------------------------------------------------------
     HORIZON = 40
     GAMMA = 0.9
@@ -381,28 +382,35 @@ def update_bc_target(env, env_ids=None):
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
 
-    # 현재 step을 trajectory 길이에 맞게 정규화
-    scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
-    scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
+    # 실수 인덱스 계산
+    scaled_idx_f = (current_step / episode_len_steps) * total_traj_len
+    idx0 = int(torch.floor(torch.tensor(scaled_idx_f)))
+    idx1 = min(idx0 + 1, total_traj_len - 1)
+    alpha = scaled_idx_f - idx0  # 보간 비율 (0~1)
 
-    # 🔍 디버깅: scaled_idx 출력
-    if current_step % 100 == 0 or current_step < 10:
-        print(f"[DEBUG] Step {current_step:04d} / {episode_len_steps} → scaled_idx = {scaled_idx:04d}/{total_traj_len}")
-
-    # ✅ future slice 구간 확보 (연속 horizon)
-    D = q_current.shape[1]
-    end_idx = min(total_traj_len, scaled_idx + HORIZON)
-    q_target_future = env._bc_full_target[scaled_idx:end_idx]
-
-    # 길이 부족 시 마지막 값으로 패딩
-    if q_target_future.shape[0] < HORIZON:
-        pad_len = HORIZON - q_target_future.shape[0]
-        q_target_future = torch.cat(
-            [q_target_future, q_target_future[-1:].repeat(pad_len, 1)], dim=0
-        )
+    # 선형 보간된 현재 target joint
+    q_target_interp = (1 - alpha) * env._bc_full_target[idx0] + alpha * env._bc_full_target[idx1]
 
     # ---------------------------------------------------------
-    # (4) Reward accumulation
+    # (4) Future target sampling (interpolated sequence)
+    # ---------------------------------------------------------
+    D = q_current.shape[1]
+    q_target_future = []
+
+    for k in range(HORIZON):
+        scaled_f_k = scaled_idx_f + k
+        idx0_k = int(torch.floor(torch.tensor(scaled_f_k)))
+        idx0_k = min(idx0_k, total_traj_len - 2)  # ✅ out-of-bound 방지
+        idx1_k = idx0_k + 1
+        alpha_k = scaled_f_k - idx0_k
+        q_interp_k = (1 - alpha_k) * env._bc_full_target[idx0_k] + alpha_k * env._bc_full_target[idx1_k]
+        q_target_future.append(q_interp_k.unsqueeze(0))
+
+    q_target_future = torch.cat(q_target_future, dim=0)
+
+
+    # ---------------------------------------------------------
+    # (5) Reward accumulation
     # ---------------------------------------------------------
     for k in range(HORIZON):
         q_target_h = q_target_future[k]
@@ -414,34 +422,64 @@ def update_bc_target(env, env_ids=None):
 
         total_reward += (GAMMA ** k) * (rew_linear + rew_tanh)
 
+    total_reward /= HORIZON
+
     # ---------------------------------------------------------
-    # (5) Temporal smoothing
+    # (6) Temporal smoothing
     # ---------------------------------------------------------
-    alpha = 0.5
+    alpha_smooth = 0.5
     if hasattr(env, "_prev_reward"):
-        total_reward = alpha * env._prev_reward + (1 - alpha) * total_reward
+        total_reward = alpha_smooth * env._prev_reward + (1 - alpha_smooth) * total_reward
     env._prev_reward = total_reward.clone()
 
     # ---------------------------------------------------------
-    # (6) Logging
+    # (7) Logging
     # ---------------------------------------------------------
     if current_step % 100 == 0:
         mean_r = total_reward.mean().item()
-        print(f"[BC Tracking v12-debug] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
+        print(f"[BC Tracking v13.1] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
 
         _joint_tracking_history.append((
             current_step,
-            q_target_future[0].detach().cpu().numpy(),
+            q_target_interp.detach().cpu().numpy(),
             q_current[0].detach().cpu().numpy()
         ))
 
     # ---------------------------------------------------------
-    # (7) Episode end & visualization
+    # (8) Episode end & visualization
     # ---------------------------------------------------------
     env._bc_step_counter += 1
     if env._bc_step_counter >= episode_len_steps:
         print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
-        ...
+
+        # ✅ 시각화 (Target vs Current)
+        if _joint_tracking_history:
+            steps, targets, currents = zip(*_joint_tracking_history)
+            targets = np.array(targets)
+            currents = np.array(currents)
+
+            plt.figure(figsize=(10, 6))
+            colors = plt.cm.tab10.colors
+            for j in range(targets.shape[1]):
+                c = colors[j % len(colors)]
+                plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=c, linewidth=1.2)
+                plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=c, linewidth=2.0)
+            plt.xlabel("Step")
+            plt.ylabel("Joint (rad)")
+            plt.title("Joint Tracking (Target vs Current)")
+            plt.legend(ncol=2, fontsize=8)
+            plt.grid(True)
+
+            save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"bc_tracking_episode{_episode_counter}.png")
+            plt.savefig(save_path)
+            plt.close()
+            print(f"[INFO] Saved BC tracking plot to {save_path}")
+
+            _episode_counter += 1
+            _joint_tracking_history.clear()
+
         env._bc_step_counter = 0
 
     return total_reward
