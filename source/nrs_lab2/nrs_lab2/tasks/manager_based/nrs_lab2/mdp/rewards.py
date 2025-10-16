@@ -325,80 +325,189 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
         else:
             preds.append(np.zeros(6))
 
-    env._bc_full_target = np.array(preds)
+    env._bc_full_target = torch.tensor(preds, dtype=torch.float32, device=env.device)
+
     env._bc_step_counter = 0
     print(f"[BC Loader] ✅ Generated BC target trajectory: {env._bc_full_target.shape}")
 
 
+
+
+
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (scaled over full episode)
+# Behavior Cloning trajectory tracking reward (v9.4 - Stable, single-print)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
 import h5py
+import os
+import matplotlib.pyplot as plt
 
 def update_bc_target(env, env_ids=None):
-    import torch, h5py, numpy as np
+    global _joint_tracking_history, _episode_counter
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
 
-    # ------------------------------
-    # (1) 시뮬레이션 파라미터
-    # ------------------------------
+    # ---------------------------------------------------------
+    # (1) Simulation parameters
+    # ---------------------------------------------------------
     dt = getattr(env.sim, "dt", 1.0 / 60.0)
     decimation = getattr(env, "decimation", 2)
-    episode_length_s = 60.0                          # ✅ 60초로 고정
+    episode_length_s = 60.0
     env.cfg.episode_length_s = episode_length_s
-    episode_len_steps = int(episode_length_s / (dt * decimation))  # 시뮬 step 수 (예: 1800)
+    episode_len_steps = int(episode_length_s / (dt * decimation))
 
-    # ------------------------------
-    # (2) Trajectory 로드
-    # ------------------------------
+    # ---------------------------------------------------------
+    # (2) Load BC trajectory (HDF5 once)
+    # ---------------------------------------------------------
     if not hasattr(env, "_bc_full_target"):
         data_path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
         with h5py.File(data_path, "r") as f:
             joint_data = np.array(f["joint_positions"])
-        env._bc_full_target = joint_data
+        env._bc_full_target = torch.tensor(joint_data, dtype=torch.float32, device=env.device)
         env._bc_step_counter = 0
         print(f"[INFO] Loaded HDF5 trajectory of shape {env._bc_full_target.shape}")
 
-    # ✅ 타입 강제 변환 (numpy → torch)
-    if isinstance(env._bc_full_target, np.ndarray):
-        env._bc_full_target = torch.tensor(env._bc_full_target, dtype=torch.float32, device=env.device)
+    total_traj_len = env._bc_full_target.shape[0]
 
-    total_traj_len = env._bc_full_target.shape[0]  # 전체 데이터 길이 (예: 5758)
-
-    # ------------------------------
-    # (3) Trajectory index scaling (핵심 수정)
-    # ------------------------------
+    # ---------------------------------------------------------
+    # (3) Step mapping
+    # ---------------------------------------------------------
     current_step = env._bc_step_counter
-    # ✅ step(0~episode_len_steps)을 dataset index(0~total_traj_len)로 선형 매핑
-    scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
-    scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
+    sim_time = current_step * dt * decimation
+    traj_time = torch.linspace(0, episode_length_s, total_traj_len, device=env.device)
+    idx0 = torch.argmin(torch.abs(traj_time - sim_time)).item()
 
-    # ------------------------------
-    # (4) Reward 계산
-    # ------------------------------
-    q_target = env._bc_full_target[scaled_idx].unsqueeze(0)  # (1,6)
+    # ---------------------------------------------------------
+    # (4) Reward parameters
+    # ---------------------------------------------------------
+    H = 20
+    GAMMA = 0.9
+    SIGMA = 0.4
+    TANH_W = 0.3
+    VEL_W = 0.3
+    DELTA_SMOOTH = 0.05
+
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
+    qdot_current = env.scene["robot"].data.joint_vel[env_ids, :6]
 
-    diff = q_current - q_target
-    error = torch.norm(diff, dim=1)
-    sigma = 0.05
-    reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
+    if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
+        q_current = (q_current - env._bc_mean) / env._bc_std
 
-    # ------------------------------
-    # (5) Counter 및 출력
-    # ------------------------------
+    total_reward = torch.zeros(q_current.shape[0], device=env.device)
+
+    # ---------------------------------------------------------
+    # (5) Discounted Hybrid Reward
+    # ---------------------------------------------------------
+    for k in range(H):
+        idx_h = min(idx0 + k, total_traj_len - 1)
+
+        q_target_h = env._bc_full_target[idx_h].unsqueeze(0)
+        if idx_h > 0:
+            qdot_target_h = (env._bc_full_target[idx_h] - env._bc_full_target[idx_h - 1]).unsqueeze(0)
+        else:
+            qdot_target_h = torch.zeros_like(q_target_h)
+
+        if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
+            q_target_h = (q_target_h - env._bc_mean) / env._bc_std
+
+        diff_q = q_current - q_target_h
+        diff_qdot = qdot_current - qdot_target_h
+        pos_error = torch.norm(diff_q, dim=1)
+        vel_error = torch.norm(diff_qdot, dim=1)
+
+        # exp kernel + tanh shaping
+        hybrid_error = (1 - TANH_W) * pos_error + TANH_W * torch.tanh(pos_error / SIGMA)
+
+        # temporal smoothness weight
+        if idx_h > 0:
+            delta_target = torch.norm(env._bc_full_target[idx_h] - env._bc_full_target[idx_h - 1])
+            temporal_w = torch.exp(-delta_target ** 2 / (2 * DELTA_SMOOTH ** 2))
+        else:
+            temporal_w = 1.0
+
+        reward_k = torch.exp(- (hybrid_error ** 2) / (2 * SIGMA ** 2))
+        reward_k *= torch.exp(-VEL_W * vel_error) * temporal_w
+
+        total_reward += (GAMMA ** k) * reward_k
+
+    # ---------------------------------------------------------
+    # (6) Normalize (average only)
+    # ---------------------------------------------------------
+    reward = total_reward / H
+    reward = torch.clamp(reward, 0.0, 1.0)
+
+    # ---------------------------------------------------------
+    # (7) Acceleration penalty
+    # ---------------------------------------------------------
+    if hasattr(env, "_prev_q"):
+        accel_penalty = torch.norm(q_current - 2 * env._prev_q + env._prev_q2, dim=1)
+        reward *= torch.exp(-0.5 * accel_penalty)
+    env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
+    env._prev_q = q_current.clone()
+
+    # ---------------------------------------------------------
+    # (8) Short moving average smoothing
+    # ---------------------------------------------------------
+    if not hasattr(env, "_reward_buffer"):
+        env._reward_buffer = []
+    env._reward_buffer.append(reward.clone())
+    if len(env._reward_buffer) > 3:
+        env._reward_buffer.pop(0)
+    reward = torch.mean(torch.stack(env._reward_buffer), dim=0)
+
+    # ---------------------------------------------------------
+    # (9) Logging — print every 10 steps, env 0 only
+    # ---------------------------------------------------------
+    if (env_ids[0] == 0) and (current_step % 10 == 0):
+        print(f"[BC Tracking v9.4] Step {current_step:05d} | "
+              f"H={H}, γ={GAMMA}, σ={SIGMA}, w={TANH_W}, v_w={VEL_W}, "
+              f"mean_r={reward.mean().item():.4f}, std_r={reward.std().item():.4f}")
+
+    # ---------------------------------------------------------
+    # (10) Tracking history for plotting
+    # ---------------------------------------------------------
+    q_target_now = env._bc_full_target[idx0].unsqueeze(0)
+    _joint_tracking_history.append((
+        current_step,
+        q_target_now[0].detach().cpu().numpy(),
+        q_current[0].detach().cpu().numpy()
+    ))
+
+    # ---------------------------------------------------------
+    # (11) Episode-end plotting
+    # ---------------------------------------------------------
     env._bc_step_counter += 1
-    if env._bc_step_counter % 100 == 0 or scaled_idx == total_traj_len - 1:
-        percent = (scaled_idx / total_traj_len) * 100
-        print(f"[BC Tracking] Dataset index {scaled_idx+1}/{total_traj_len} ({percent:.1f}%), mean error={error.mean():.4f}")
-
-    # 에피소드가 끝나면 step 카운터 리셋
     if env._bc_step_counter >= episode_len_steps:
+        if (env_ids[0] == 0):  # only once
+            if _joint_tracking_history:
+                steps, targets, currents = zip(*_joint_tracking_history)
+                targets = np.array(targets)
+                currents = np.array(currents)
+
+                plt.figure(figsize=(10, 6))
+                colors = plt.cm.tab10.colors
+                for j in range(targets.shape[1]):
+                    color = colors[j % len(colors)]
+                    plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=color, linewidth=1.2)
+                    plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=color, linewidth=2.0)
+
+                plt.xlabel("Step")
+                plt.ylabel("Joint Value (rad)")
+                plt.title("Joint Tracking (Target vs Current)")
+                plt.legend(ncol=2, fontsize=8)
+                plt.grid(True)
+
+                save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
+                os.makedirs(save_dir, exist_ok=True)
+                save_path = os.path.join(save_dir, f"bc_tracking_episode{_episode_counter}.png")
+                plt.savefig(save_path)
+                plt.close()
+                print(f"[INFO] Saved BC tracking plot to {save_path}")
+
+                _episode_counter += 1
+                _joint_tracking_history.clear()
         env._bc_step_counter = 0
-        print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
 
     return reward
