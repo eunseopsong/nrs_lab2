@@ -331,7 +331,8 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (Horizon-based v5 integrated)
+# Behavior Cloning trajectory tracking reward (v9_norm)
+# - exponential → norm 방식 (linear + tanh 형태 아님)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
@@ -373,101 +374,66 @@ def update_bc_target(env, env_ids=None):
     total_traj_len = env._bc_full_target.shape[0]
 
     # ------------------------------
-    # (3) Index scaling
+    # (3) 현재 step 및 scaling index
     # ------------------------------
     current_step = env._bc_step_counter
     scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
+    scaled_idx_t = torch.tensor(scaled_idx, device=env.device, dtype=torch.long)
 
     # ------------------------------
-    # (Improved Reward v8 - Hybrid exponential + tanh shaping with discount normalization)
+    # (4) v8_norm: exponential → norm 방식
     # ------------------------------
     HORIZON = 10
     GAMMA = 0.9
-    SIGMA = 1.0        # reward sensitivity (너무 작으면 reward 소멸)
-    TANH_WEIGHT = 0.3  # tanh 항의 soft blending weight
 
-    # ✅ 현재 step 및 상태
-    current_step = env._bc_step_counter
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
-
-    # ✅ normalization (if available)
-    if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
-        q_current = (q_current - env._bc_mean) / env._bc_std
-
-    # ✅ discounted hybrid reward 계산
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
-    total_traj_len = env._bc_full_target.shape[0]
-
-    t = current_step / episode_len_steps
-    idx_f = torch.tensor(t * (total_traj_len - 1), device=env.device)
-    idx0 = torch.floor(idx_f).long()
 
     for k in range(HORIZON):
-        idx_h = torch.clamp(idx0 + k, max=total_traj_len - 1)
+        idx_h = torch.clamp(scaled_idx_t + k, max=total_traj_len - 1)
         q_target_h = env._bc_full_target[idx_h].unsqueeze(0).to(env.device)
+
+        # normalization (if available)
         if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
             q_target_h = (q_target_h - env._bc_mean) / env._bc_std
+            q_current = (q_current - env._bc_mean) / env._bc_std
 
+        # ✅ difference
         diff = q_current - q_target_h
         error_norm = torch.norm(diff, dim=1)
 
-        # ✅ hybrid error shaping
-        hybrid_error = (1 - TANH_WEIGHT) * error_norm + TANH_WEIGHT * torch.tanh(error_norm / SIGMA)
-
-        reward_k = torch.exp(- (hybrid_error ** 2) / (2 * SIGMA ** 2))
+        # ✅ reward (exponential 제거, 단순 norm 기반)
+        reward_k = 1.0 - torch.clamp(error_norm, 0.0, 2.0)  # 0~1 사이에 매핑
         total_reward += (GAMMA ** k) * reward_k
 
-    # ✅ normalization term (prevent discount collapse)
-    Z = (1 - GAMMA ** HORIZON)
-    reward = total_reward / Z
+    # normalize
+    reward = total_reward / HORIZON
 
-    # ✅ smoothness penalty
-    if hasattr(env, "_prev_q"):
-        accel_penalty = torch.norm(q_current - 2 * env._prev_q + env._prev_q2, dim=1)
-        reward *= torch.exp(-0.5 * accel_penalty)
-    env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
-    env._prev_q = q_current.clone()
-
-    # ✅ temporal smoothing
+    # ------------------------------
+    # (5) temporal smoothing
+    # ------------------------------
     alpha = 0.5
     if hasattr(env, "_prev_reward"):
         reward = alpha * env._prev_reward + (1 - alpha) * reward
     env._prev_reward = reward.clone()
 
-    reward = torch.clamp(reward, 0.0, 1.0)
-
-    # ✅ logging
+    # ------------------------------
+    # (6) logging
+    # ------------------------------
     if current_step % 100 == 0:
-        print(f"[BC Tracking v8] Step {current_step:05d} | "
-              f"H={HORIZON}, γ={GAMMA}, σ={SIGMA}, w={TANH_WEIGHT}, mean_r={reward.mean().item():.4f}")
-
-
-
-
-    # ------------------------------
-    # (5) 기록 (env 0 기준)
-    # ------------------------------
-    step = int(env._bc_step_counter)
-    q_target_now = env._bc_full_target[idx0].unsqueeze(0).to(env.device)  # ✅ 현재 target 추가
-
-    _joint_tracking_history.append(
-        (step,
-         q_target_now[0].detach().cpu().numpy(),
-         q_current[0].detach().cpu().numpy())
-    )
+        mean_r = reward.mean().item()
+        print(f"[BC Tracking v9_norm] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
+        _joint_tracking_history.append((
+            current_step,
+            q_target_h[0].detach().cpu().numpy(),
+            q_current[0].detach().cpu().numpy()
+        ))
 
     # ------------------------------
-    # (6) Counter 및 출력
+    # (7) Counter 및 Episode 종료 처리
     # ------------------------------
     env._bc_step_counter += 1
-    if env._bc_step_counter % 100 == 0 or scaled_idx == total_traj_len - 1:
-        percent = (scaled_idx / total_traj_len) * 100
-        print(f"[BC Tracking] Dataset index {scaled_idx+1}/{total_traj_len} ({percent:.1f}%), mean_r={reward.mean():.4f}")
-
-    # ------------------------------
-    # (7) 시각화 및 리셋
-    # ------------------------------
     if env._bc_step_counter >= episode_len_steps:
         print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
 
@@ -479,12 +445,11 @@ def update_bc_target(env, env_ids=None):
             plt.figure(figsize=(10, 6))
             colors = plt.cm.tab10.colors
             for j in range(targets.shape[1]):
-                color = colors[j % len(colors)]
-                plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=color, linewidth=1.2)
-                plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=color, linewidth=2.0)
-
+                c = colors[j % len(colors)]
+                plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=c, linewidth=1.2)
+                plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=c, linewidth=2.0)
             plt.xlabel("Step")
-            plt.ylabel("Joint Value (rad)")
+            plt.ylabel("Joint (rad)")
             plt.title("Joint Tracking (Target vs Current)")
             plt.legend(ncol=2, fontsize=8)
             plt.grid(True)
