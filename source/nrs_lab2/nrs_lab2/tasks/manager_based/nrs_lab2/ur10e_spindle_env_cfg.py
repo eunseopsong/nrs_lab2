@@ -178,8 +178,7 @@ class ObservationsCfg:
 
         def __post_init__(self):
             # 관측 오염(노이즈) 허용
-            # self.enable_corruption = True
-            self.enable_corruption = False
+            self.enable_corruption = True
             # ✅ 모든 관측값을 하나의 벡터로 결합 (policy input으로 전달)
             self.concatenate_terms = True
 
@@ -199,11 +198,11 @@ class EventCfg:
         mode="reset",
         params={"position_range": (0.75, 1.25), "velocity_range": (0.0, 0.0)},
     )
-    # load_hdf5 = EventTerm(
-    #     func=local_obs.load_hdf5_trajectory,
-    #     mode="reset",
-    #     params={"trajectory": None},
-    # )
+    load_hdf5 = EventTerm(
+        func=local_obs.load_hdf5_trajectory,
+        mode="reset",
+        params={"trajectory": None},
+    )
     load_bc_trajectory = EventTerm(
         func=local_rewards.load_bc_trajectory,
         mode="reset",
@@ -255,7 +254,7 @@ class RewardsCfg:
 
     bc_tracking_reward = RewTerm(
         func=local_rewards.update_bc_target,
-        weight=5.0,
+        weight=1.0,
     )
 
 
@@ -295,7 +294,6 @@ class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
         self.actions.arm_action = mdp.JointPositionActionCfg(
             asset_name="robot",
             joint_names=[".*"],
-            # scale=0.2,
-            scale=0.5,
+            scale=0.2,
             use_default_offset=True,
         )
