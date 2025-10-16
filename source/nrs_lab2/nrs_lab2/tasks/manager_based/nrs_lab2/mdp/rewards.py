@@ -331,62 +331,63 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (v10 - norm + tanh + discounted + smoothing)
+# Behavior Cloning trajectory tracking reward (v11 - aligned with joint_tracking_reward)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
 import h5py
+import os
+from matplotlib import pyplot as plt
 
 def update_bc_target(env, env_ids=None):
-    import torch, h5py, numpy as np
-    from matplotlib import pyplot as plt
-    import os
-
     global _joint_tracking_history, _episode_counter
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
 
-    # ------------------------------
+    # ---------------------------------------------------------
     # (1) 시뮬레이션 파라미터
-    # ------------------------------
+    # ---------------------------------------------------------
     dt = getattr(env.sim, "dt", 1.0 / 60.0)
     decimation = getattr(env, "decimation", 2)
     episode_length_s = 60.0
     env.cfg.episode_length_s = episode_length_s
     episode_len_steps = int(episode_length_s / (dt * decimation))
 
-    # ------------------------------
+    # ---------------------------------------------------------
     # (2) Trajectory 로드
-    # ------------------------------
+    # ---------------------------------------------------------
+    data_path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
+
+    # 항상 로드 확인
     if not hasattr(env, "_bc_full_target"):
-        data_path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
         with h5py.File(data_path, "r") as f:
             joint_data = np.array(f["joint_positions"])
         env._bc_full_target = joint_data
         env._bc_step_counter = 0
         print(f"[INFO] Loaded HDF5 trajectory of shape {env._bc_full_target.shape}")
 
-    # ✅ numpy → torch
-    if isinstance(env._bc_full_target, np.ndarray):
-        env._bc_full_target = torch.tensor(env._bc_full_target, dtype=torch.float32, device=env.device)
+    # ✅ torch tensor로 강제 변환 (매번 보장)
+    if not isinstance(env._bc_full_target, torch.Tensor):
+        env._bc_full_target = torch.tensor(
+            env._bc_full_target, dtype=torch.float32, device=env.device
+        )
 
     total_traj_len = env._bc_full_target.shape[0]
 
-    # ------------------------------
-    # (3) 현재 step 및 scaling index
-    # ------------------------------
+    # ---------------------------------------------------------
+    # (3) Step index scaling
+    # ---------------------------------------------------------
     current_step = env._bc_step_counter
     scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
     scaled_idx_t = torch.tensor(scaled_idx, device=env.device, dtype=torch.long)
 
-    # ------------------------------
-    # (4) v10: Linear + tanh shaping + discounted horizon
-    # ------------------------------
+    # ---------------------------------------------------------
+    # (4) Reward 계산 (joint_tracking_reward 구조 동일)
+    # ---------------------------------------------------------
     HORIZON = 10
     GAMMA = 0.9
-    SIGMA = 0.3  # tanh scaling factor
 
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
@@ -395,62 +396,65 @@ def update_bc_target(env, env_ids=None):
         idx_h = torch.clamp(scaled_idx_t + k, max=total_traj_len - 1)
         q_target_h = env._bc_full_target[idx_h].unsqueeze(0).to(env.device)
 
-        # ✅ normalization (if available)
-        if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
-            q_target_h = (q_target_h - env._bc_mean) / env._bc_std
-            q_current_n = (q_current - env._bc_mean) / env._bc_std
-        else:
-            q_current_n = q_current
-
-        diff = q_current_n - q_target_h
+        diff = q_current - q_target_h
         error_norm = torch.norm(diff, dim=1)
 
-        # ✅ Linear term + tanh shaping term
-        rew_linear = -error_norm
-        rew_tanh = 1 - torch.tanh(error_norm / SIGMA)
+        # ✅ joint_tracking_reward와 동일한 수식
+        rew_pos = -error_norm
+        rew_tanh = torch.tanh(-error_norm)
+        total_reward += (GAMMA ** k) * (rew_pos + rew_tanh)
 
-        # ✅ Discounted accumulation
-        total_reward += (GAMMA ** k) * (rew_linear + rew_tanh)
-
-    # ------------------------------
-    # (5) Temporal smoothing (EMA)
-    # ------------------------------
+    # ---------------------------------------------------------
+    # (5) Temporal smoothing
+    # ---------------------------------------------------------
     alpha = 0.5
     if hasattr(env, "_prev_reward"):
         total_reward = alpha * env._prev_reward + (1 - alpha) * total_reward
     env._prev_reward = total_reward.clone()
 
-    # ------------------------------
-    # (6) Logging
-    # ------------------------------
+    # ---------------------------------------------------------
+    # (6) Logging & History 기록 (매 step 기록)
+    # ---------------------------------------------------------
+    mean_r = total_reward.mean().item()
     if current_step % 100 == 0:
-        mean_r = total_reward.mean().item()
-        print(f"[BC Tracking v10] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, σ={SIGMA}, mean_r={mean_r:.4f}")
+        print(f"[BC Tracking v11] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
 
-        _joint_tracking_history.append((
-            current_step,
-            q_target_h[0].detach().cpu().numpy(),
-            q_current[0].detach().cpu().numpy()
-        ))
+    if not hasattr(env, "_joint_tracking_history_initialized"):
+        _joint_tracking_history = []
+        _episode_counter = 0
+        env._joint_tracking_history_initialized = True
 
-    # ------------------------------
-    # (7) Counter 및 Episode 종료 처리
-    # ------------------------------
+    _joint_tracking_history.append((
+        current_step,
+        q_target_h[0].detach().cpu().numpy(),
+        q_current[0].detach().cpu().numpy()
+    ))
+
+    # ---------------------------------------------------------
+    # (7) Episode 종료 시 시각화
+    # ---------------------------------------------------------
     env._bc_step_counter += 1
     if env._bc_step_counter >= episode_len_steps:
         print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
 
         if _joint_tracking_history:
             steps, targets, currents = zip(*_joint_tracking_history)
+            steps = np.array(steps)
             targets = np.array(targets)
             currents = np.array(currents)
+
+            # 🔹 smoothing (moving average)
+            window = 5
+            def smooth(x):
+                return np.convolve(x, np.ones(window)/window, mode="same")
 
             plt.figure(figsize=(10, 6))
             colors = plt.cm.tab10.colors
             for j in range(targets.shape[1]):
                 c = colors[j % len(colors)]
-                plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=c, linewidth=1.2)
-                plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=c, linewidth=2.0)
+                plt.plot(steps, smooth(targets[:, j]), "--", label=f"Target q{j+1}", color=c, linewidth=1.2)
+                plt.plot(steps, smooth(currents[:, j]), "-", label=f"Current q{j+1}", color=c, linewidth=2.0)
+
             plt.xlabel("Step")
             plt.ylabel("Joint (rad)")
             plt.title("Joint Tracking (Target vs Current)")
