@@ -82,8 +82,8 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 import matplotlib
 matplotlib.use("Agg")   # ✅ headless 환경에서도 저장되게 강제
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 10):
-    global _joint_tracking_history
+def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 30):
+    global _joint_tracking_history, _episode_counter
 
     q = env.scene["robot"].data.joint_pos[:, :6]
     future_targets = get_hdf5_target_future(env, horizon=horizon)
@@ -92,6 +92,9 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
     horizon = min(horizon, future_targets.shape[1] // D)
     total_reward = torch.zeros(num_envs, device=env.device)
 
+    # ------------------------------
+    # (1) Reward 계산 (기존 그대로)
+    # ------------------------------
     for k in range(horizon):
         target_k = future_targets[:, k*D:(k+1)*D]
         diff = q - target_k
@@ -99,17 +102,24 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
         rew_tanh = torch.tanh(-torch.norm(diff, dim=1))
         total_reward += (gamma ** k) * (rew_pos + rew_tanh)
 
-    # ✅ 모든 step 기록하도록 수정
+    # ------------------------------
+    # (2) History 저장
+    # ------------------------------
     step = int(env.common_step_counter)
     target_now = future_targets[:, :D][0].detach().cpu().numpy()
     current_now = q[0].detach().cpu().numpy()
     _joint_tracking_history.append((step, target_now, current_now))
 
-    # ✅ 1000 step마다 강제로 저장
-    if step > 0 and step % 1000 == 0:
-        save_joint_tracking_plot(env)
+    # ------------------------------
+    # (3) Episode 종료 시 시각화
+    # ------------------------------
+    if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
+        if step > 0 and step % int(env.max_episode_length) == 0:
+            if _joint_tracking_history:
+                save_joint_tracking_plot(env)
 
     return total_reward
+
 
 # -------------------
 # Contact Force reward
