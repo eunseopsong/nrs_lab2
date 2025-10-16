@@ -331,8 +331,7 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (v9_norm)
-# - exponential → norm 방식 (linear + tanh 형태 아님)
+# Behavior Cloning trajectory tracking reward (v10 - norm + tanh + discounted + smoothing)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
@@ -368,6 +367,7 @@ def update_bc_target(env, env_ids=None):
         env._bc_step_counter = 0
         print(f"[INFO] Loaded HDF5 trajectory of shape {env._bc_full_target.shape}")
 
+    # ✅ numpy → torch
     if isinstance(env._bc_full_target, np.ndarray):
         env._bc_full_target = torch.tensor(env._bc_full_target, dtype=torch.float32, device=env.device)
 
@@ -382,10 +382,11 @@ def update_bc_target(env, env_ids=None):
     scaled_idx_t = torch.tensor(scaled_idx, device=env.device, dtype=torch.long)
 
     # ------------------------------
-    # (4) v8_norm: exponential → norm 방식
+    # (4) v10: Linear + tanh shaping + discounted horizon
     # ------------------------------
     HORIZON = 10
     GAMMA = 0.9
+    SIGMA = 0.3  # tanh scaling factor
 
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
@@ -394,36 +395,38 @@ def update_bc_target(env, env_ids=None):
         idx_h = torch.clamp(scaled_idx_t + k, max=total_traj_len - 1)
         q_target_h = env._bc_full_target[idx_h].unsqueeze(0).to(env.device)
 
-        # normalization (if available)
+        # ✅ normalization (if available)
         if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
             q_target_h = (q_target_h - env._bc_mean) / env._bc_std
-            q_current = (q_current - env._bc_mean) / env._bc_std
+            q_current_n = (q_current - env._bc_mean) / env._bc_std
+        else:
+            q_current_n = q_current
 
-        # ✅ difference
-        diff = q_current - q_target_h
+        diff = q_current_n - q_target_h
         error_norm = torch.norm(diff, dim=1)
 
-        # ✅ reward (exponential 제거, 단순 norm 기반)
-        reward_k = 1.0 - torch.clamp(error_norm, 0.0, 2.0)  # 0~1 사이에 매핑
-        total_reward += (GAMMA ** k) * reward_k
+        # ✅ Linear term + tanh shaping term
+        rew_linear = -error_norm
+        rew_tanh = 1 - torch.tanh(error_norm / SIGMA)
 
-    # normalize
-    reward = total_reward / HORIZON
+        # ✅ Discounted accumulation
+        total_reward += (GAMMA ** k) * (rew_linear + rew_tanh)
 
     # ------------------------------
-    # (5) temporal smoothing
+    # (5) Temporal smoothing (EMA)
     # ------------------------------
     alpha = 0.5
     if hasattr(env, "_prev_reward"):
-        reward = alpha * env._prev_reward + (1 - alpha) * reward
-    env._prev_reward = reward.clone()
+        total_reward = alpha * env._prev_reward + (1 - alpha) * total_reward
+    env._prev_reward = total_reward.clone()
 
     # ------------------------------
-    # (6) logging
+    # (6) Logging
     # ------------------------------
     if current_step % 100 == 0:
-        mean_r = reward.mean().item()
-        print(f"[BC Tracking v9_norm] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
+        mean_r = total_reward.mean().item()
+        print(f"[BC Tracking v10] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, σ={SIGMA}, mean_r={mean_r:.4f}")
+
         _joint_tracking_history.append((
             current_step,
             q_target_h[0].detach().cpu().numpy(),
@@ -466,4 +469,4 @@ def update_bc_target(env, env_ids=None):
 
         env._bc_step_counter = 0
 
-    return reward
+    return total_reward
