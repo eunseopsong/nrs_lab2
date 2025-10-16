@@ -380,22 +380,27 @@ def update_bc_target(env, env_ids=None):
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
 
     # ------------------------------
-    # (4) Horizon-based discounted reward (v5 logic)
+    # (4) Improved Reward v6 - Long-horizon Weighted Reward
     # ------------------------------
-    HORIZON = 5
-    GAMMA = 0.9
-    SIGMA = 0.3
+    HORIZON = 15
+    GAMMA = 0.95
+    SIGMA = 0.7
+    JOINT_WEIGHTS = torch.tensor([1.0, 1.0, 1.0, 0.8, 0.6, 0.6], device=env.device)
 
-    # ✅ 시간 스케일링
-    t = current_step / episode_len_steps
-    idx_f = torch.tensor(t * (total_traj_len - 1), device=env.device)
-    idx0 = torch.floor(idx_f).long()
+    # ✅ Trajectory scaling (정확한 시간 매핑)
+    ratio = total_traj_len / episode_len_steps
+    current_step = env._bc_step_counter
+    idx_f = torch.tensor(current_step * ratio, device=env.device)
+    idx0 = torch.floor(idx_f).long().clamp(0, total_traj_len - 1)
 
+    # ✅ 현재 로봇 상태
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
 
+    # ✅ normalization (있을 경우)
     if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
         q_current = (q_current - env._bc_mean) / env._bc_std
 
+    # ✅ Long-horizon weighted reward 계산
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
     for k in range(HORIZON):
         idx_h = torch.clamp(idx0 + k, max=total_traj_len - 1)
@@ -403,20 +408,23 @@ def update_bc_target(env, env_ids=None):
         if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
             q_target_h = (q_target_h - env._bc_mean) / env._bc_std
 
+        # joint weight 적용
         diff = q_current - q_target_h
-        error = torch.norm(diff, dim=1)
+        error = torch.sqrt(torch.sum(JOINT_WEIGHTS * (diff ** 2), dim=1))
+
         reward_k = torch.exp(- (error ** 2) / (2 * SIGMA ** 2))
         total_reward += (GAMMA ** k) * reward_k
 
-    reward = total_reward / HORIZON
+    reward = total_reward / HORIZON  # normalize
 
-    # ✅ smoothness penalty
+    # ✅ Smoothness penalty (가속도 변화 최소화)
     if hasattr(env, "_prev_q"):
         accel_penalty = torch.norm(q_current - 2 * env._prev_q + env._prev_q2, dim=1)
         reward *= torch.exp(-0.5 * accel_penalty)
     env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
     env._prev_q = q_current.clone()
 
+    # ✅ Temporal smoothing
     alpha = 0.5
     if hasattr(env, "_prev_reward"):
         reward = alpha * env._prev_reward + (1 - alpha) * reward
@@ -424,18 +432,23 @@ def update_bc_target(env, env_ids=None):
 
     reward = torch.clamp(reward, 0.0, 1.0)
 
-    # ✅ 현재 horizon의 첫 target 저장 (for history)
-    q_target = env._bc_full_target[idx0].unsqueeze(0).to(env.device)
-
+    # ✅ logging
     if current_step % 100 == 0:
-        print(f"[BC Tracking v5] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={reward.mean().item():.4f}")
+        percent = (idx0.item() + 1) / total_traj_len * 100
+        print(f"[BC Tracking v6] Step {current_step:05d} | "
+              f"H={HORIZON}, γ={GAMMA}, σ={SIGMA}, mean_r={reward.mean().item():.4f}")
+
 
     # ------------------------------
     # (5) 기록 (env 0 기준)
     # ------------------------------
     step = int(env._bc_step_counter)
+    q_target_now = env._bc_full_target[idx0].unsqueeze(0).to(env.device)  # ✅ 현재 target 추가
+
     _joint_tracking_history.append(
-        (step, q_target[0].detach().cpu().numpy(), q_current[0].detach().cpu().numpy())
+        (step,
+         q_target_now[0].detach().cpu().numpy(),
+         q_current[0].detach().cpu().numpy())
     )
 
     # ------------------------------
