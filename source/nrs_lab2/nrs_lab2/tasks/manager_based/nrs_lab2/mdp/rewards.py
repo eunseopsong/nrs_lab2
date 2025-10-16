@@ -331,12 +331,13 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (v13.3: sim_time-based indexing + per-episode visualization)
+# Behavior Cloning trajectory tracking reward (v13.4: real-time aware, sim_time sync)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
 import h5py
 import os
+import time
 from matplotlib import pyplot as plt
 
 
@@ -349,6 +350,8 @@ def update_bc_target(env, env_ids=None):
         _joint_tracking_history = []
     if "_episode_counter" not in globals():
         _episode_counter = 0
+    if not hasattr(env, "_start_wall_time"):
+        env._start_wall_time = time.time()
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
@@ -357,7 +360,7 @@ def update_bc_target(env, env_ids=None):
     # (1) Simulation parameters
     # ---------------------------------------------------------
     dt = getattr(env.sim, "dt", 1.0 / 120.0)
-    decimation = getattr(env, "decimation", 1)
+    decimation = getattr(env, "decimation", 2)      # ✅ reward 계산은 decimation 단위로
     episode_length_s = 60.0
     env.cfg.episode_length_s = episode_length_s
 
@@ -384,23 +387,25 @@ def update_bc_target(env, env_ids=None):
     GAMMA = 0.9
     SIGMA = 0.3
 
-    # 실제 시뮬레이션 시간
     sim_time = getattr(env, "sim_time", env._bc_step_counter * dt)
+    wall_time = time.time() - env._start_wall_time  # ✅ 실제 경과 시간
+
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
 
-    # 실수 인덱스 계산 (실제 시뮬 시간 기반)
     scaled_idx_f = (sim_time / episode_length_s) * total_traj_len
     idx0 = int(torch.floor(torch.tensor(scaled_idx_f)))
     idx0 = min(idx0, total_traj_len - 2)
     idx1 = idx0 + 1
     alpha = scaled_idx_f - idx0
 
-    # ✅ 디버깅 출력
+    # ✅ Debug: sim_time vs wall_time 비교
     if env._bc_step_counter % 100 == 0 or env._bc_step_counter < 10:
-        print(f"[DEBUG] Step {env._bc_step_counter:04d} | t={sim_time:.3f}s | scaled_idx_f={scaled_idx_f:.2f}, idx0={idx0}, idx1={idx1}, α={alpha:.3f}")
+        print(
+            f"[DEBUG] Step {env._bc_step_counter:05d} | sim_t={sim_time:6.3f}s | wall_t={wall_time:6.3f}s | "
+            f"scaled_idx={scaled_idx_f:6.2f}, idx0={idx0}, α={alpha:.3f}"
+        )
 
-    # 선형 보간된 현재 target joint
     q_target_interp = (1 - alpha) * env._bc_full_target[idx0] + alpha * env._bc_full_target[idx1]
 
     # ---------------------------------------------------------
@@ -418,31 +423,38 @@ def update_bc_target(env, env_ids=None):
     q_target_future = torch.cat(q_target_future, dim=0)
 
     # ---------------------------------------------------------
-    # (5) Reward accumulation
+    # (5) Reward accumulation (decimation 단위 계산)
     # ---------------------------------------------------------
-    for k in range(HORIZON):
-        q_target_h = q_target_future[k]
-        diff = q_current - q_target_h
-        error = torch.norm(diff, dim=1)
-        rew_linear = -error
-        rew_tanh = 1 - torch.tanh(error / SIGMA)
-        total_reward += (GAMMA ** k) * (rew_linear + rew_tanh)
-    total_reward /= HORIZON
+    if env._bc_step_counter % decimation == 0:
+        for k in range(HORIZON):
+            q_target_h = q_target_future[k]
+            diff = q_current - q_target_h
+            error = torch.norm(diff, dim=1)
+            rew_linear = -error
+            rew_tanh = 1 - torch.tanh(error / SIGMA)
+            total_reward += (GAMMA ** k) * (rew_linear + rew_tanh)
+        total_reward /= HORIZON
+        env._prev_reward = total_reward.clone()
+    else:
+        total_reward = getattr(env, "_prev_reward", torch.zeros_like(total_reward))
 
     # ---------------------------------------------------------
     # (6) Temporal smoothing
     # ---------------------------------------------------------
     alpha_smooth = 0.5
-    if hasattr(env, "_prev_reward"):
-        total_reward = alpha_smooth * env._prev_reward + (1 - alpha_smooth) * total_reward
-    env._prev_reward = total_reward.clone()
+    if hasattr(env, "_prev_reward_smooth"):
+        total_reward = alpha_smooth * env._prev_reward_smooth + (1 - alpha_smooth) * total_reward
+    env._prev_reward_smooth = total_reward.clone()
 
     # ---------------------------------------------------------
     # (7) Logging
     # ---------------------------------------------------------
     if env._bc_step_counter % 10 == 0:
         mean_r = total_reward.mean().item()
-        print(f"[BC Tracking v13.3] Step {env._bc_step_counter:05d} | t={sim_time:.2f}s | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}")
+        print(
+            f"[BC Tracking v13.4] Step {env._bc_step_counter:05d} | "
+            f"t_sim={sim_time:5.2f}s | t_wall={wall_time:5.2f}s | H={HORIZON}, γ={GAMMA}, mean_r={mean_r:.4f}"
+        )
         _joint_tracking_history.append((
             env._bc_step_counter,
             q_target_interp.detach().cpu().numpy(),
@@ -450,11 +462,11 @@ def update_bc_target(env, env_ids=None):
         ))
 
     # ---------------------------------------------------------
-    # (8) Episode end & visualization (60초 기준)
+    # (8) Episode end & visualization (sim_time 기반)
     # ---------------------------------------------------------
     env._bc_step_counter += 1
     if sim_time >= episode_length_s:
-        print(f"[BC Loader] 🔁 Episode {_episode_counter} finished (t={sim_time:.2f}s) — saving joint tracking plot...")
+        print(f"[BC Loader] 🔁 Episode {_episode_counter} finished (t_sim={sim_time:.2f}s, t_wall={wall_time:.2f}s) — saving plot...")
 
         if len(_joint_tracking_history) > 0:
             steps, targets, currents = zip(*_joint_tracking_history)
@@ -484,5 +496,6 @@ def update_bc_target(env, env_ids=None):
         _episode_counter += 1
         _joint_tracking_history.clear()
         env._bc_step_counter = 0
+        env._start_wall_time = time.time()
 
     return total_reward
