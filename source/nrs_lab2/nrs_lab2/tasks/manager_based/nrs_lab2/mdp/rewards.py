@@ -325,40 +325,42 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
         else:
             preds.append(np.zeros(6))
 
-    env._bc_full_target = np.array(preds)
+    env._bc_full_target = torch.tensor(preds, dtype=torch.float32, device=env.device)
+
     env._bc_step_counter = 0
     print(f"[BC Loader] ✅ Generated BC target trajectory: {env._bc_full_target.shape}")
 
 
+
+
+
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (v9.2 - Gradient-stabilized hybrid)
+# Behavior Cloning trajectory tracking reward (v9.4 - Stable, single-print)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
 import h5py
+import os
+import matplotlib.pyplot as plt
 
 def update_bc_target(env, env_ids=None):
-    import torch, h5py, numpy as np
-    from matplotlib import pyplot as plt
-    import os
-
     global _joint_tracking_history, _episode_counter
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
 
-    # ------------------------------
+    # ---------------------------------------------------------
     # (1) Simulation parameters
-    # ------------------------------
+    # ---------------------------------------------------------
     dt = getattr(env.sim, "dt", 1.0 / 60.0)
     decimation = getattr(env, "decimation", 2)
     episode_length_s = 60.0
     env.cfg.episode_length_s = episode_length_s
     episode_len_steps = int(episode_length_s / (dt * decimation))
 
-    # ------------------------------
-    # (2) Load BC target trajectory
-    # ------------------------------
+    # ---------------------------------------------------------
+    # (2) Load BC trajectory (HDF5 once)
+    # ---------------------------------------------------------
     if not hasattr(env, "_bc_full_target"):
         data_path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
         with h5py.File(data_path, "r") as f:
@@ -366,154 +368,146 @@ def update_bc_target(env, env_ids=None):
         env._bc_full_target = torch.tensor(joint_data, dtype=torch.float32, device=env.device)
         env._bc_step_counter = 0
         print(f"[INFO] Loaded HDF5 trajectory of shape {env._bc_full_target.shape}")
-    else:
-        # ✅ ensure it’s still torch.Tensor (in case reset changed it)
-        if isinstance(env._bc_full_target, np.ndarray):
-            env._bc_full_target = torch.tensor(env._bc_full_target, dtype=torch.float32, device=env.device)
 
-    # ------------------------------
-    # (3) Time & indexing (fixed order)
-    # ------------------------------
-    total_traj_len = env._bc_full_target.shape[0]   # ✅ moved here
+    total_traj_len = env._bc_full_target.shape[0]
+
+    # ---------------------------------------------------------
+    # (3) Step mapping
+    # ---------------------------------------------------------
     current_step = env._bc_step_counter
     sim_time = current_step * dt * decimation
     traj_time = torch.linspace(0, episode_length_s, total_traj_len, device=env.device)
     idx0 = torch.argmin(torch.abs(traj_time - sim_time)).item()
 
-
-    # ------------------------------
-    # (4) Reward parameters (v9.2)
-    # ------------------------------
-    HORIZON = 5
+    # ---------------------------------------------------------
+    # (4) Reward parameters
+    # ---------------------------------------------------------
+    H = 20
     GAMMA = 0.9
-    SIGMA = 1.0         # ↑ sensitivity (broader gradient range)
-    TANH_WEIGHT = 0.3
-    VEL_WEIGHT = 0.3
-    REWARD_SCALE = 5.0  # ↑ stronger signal
-    NOISE_WEIGHT = 0.05 # exploration term
+    SIGMA = 0.4
+    TANH_W = 0.3
+    VEL_W = 0.3
+    DELTA_SMOOTH = 0.05
 
-    # ------------------------------
-    # (5) Current states
-    # ------------------------------
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
     qdot_current = env.scene["robot"].data.joint_vel[env_ids, :6]
 
-    # Normalization (optional)
     if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
         q_current = (q_current - env._bc_mean) / env._bc_std
 
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
 
-    # ------------------------------
-    # (6) Discounted hybrid reward
-    # ------------------------------
-    for k in range(HORIZON):
-        idx_h = torch.clamp(torch.tensor(idx0 + k, device=env.device), max=total_traj_len - 1)
-        q_target_h = env._bc_full_target[idx_h].unsqueeze(0).to(env.device)
+    # ---------------------------------------------------------
+    # (5) Discounted Hybrid Reward
+    # ---------------------------------------------------------
+    for k in range(H):
+        idx_h = min(idx0 + k, total_traj_len - 1)
 
+        q_target_h = env._bc_full_target[idx_h].unsqueeze(0)
         if idx_h > 0:
-            qdot_target_h = (env._bc_full_target[idx_h] - env._bc_full_target[idx_h - 1]).unsqueeze(0).to(env.device)
+            qdot_target_h = (env._bc_full_target[idx_h] - env._bc_full_target[idx_h - 1]).unsqueeze(0)
         else:
             qdot_target_h = torch.zeros_like(q_target_h)
 
-        # Normalize target if necessary
         if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
             q_target_h = (q_target_h - env._bc_mean) / env._bc_std
 
         diff_q = q_current - q_target_h
         diff_qdot = qdot_current - qdot_target_h
+        pos_error = torch.norm(diff_q, dim=1)
+        vel_error = torch.norm(diff_qdot, dim=1)
 
-        e_p = torch.norm(diff_q, dim=1)
-        e_v = torch.norm(diff_qdot, dim=1)
+        # exp kernel + tanh shaping
+        hybrid_error = (1 - TANH_W) * pos_error + TANH_W * torch.tanh(pos_error / SIGMA)
 
-        # ✅ Hybrid shaping (non-saturating)
-        e_h = (1 - TANH_WEIGHT) * e_p + TANH_WEIGHT * torch.tanh(e_p / SIGMA)
+        # temporal smoothness weight
+        if idx_h > 0:
+            delta_target = torch.norm(env._bc_full_target[idx_h] - env._bc_full_target[idx_h - 1])
+            temporal_w = torch.exp(-delta_target ** 2 / (2 * DELTA_SMOOTH ** 2))
+        else:
+            temporal_w = 1.0
 
-        # ✅ Reward kernel (broadened, non-zero gradient)
-        reward_k = REWARD_SCALE * torch.exp(- (e_h ** 2) / (2 * SIGMA ** 2))
-        reward_k *= 1.0 / (1.0 + VEL_WEIGHT * e_v)
+        reward_k = torch.exp(- (hybrid_error ** 2) / (2 * SIGMA ** 2))
+        reward_k *= torch.exp(-VEL_W * vel_error) * temporal_w
 
         total_reward += (GAMMA ** k) * reward_k
 
-    # Average over horizon
-    reward = total_reward / HORIZON
+    # ---------------------------------------------------------
+    # (6) Normalize (average only)
+    # ---------------------------------------------------------
+    reward = total_reward / H
+    reward = torch.clamp(reward, 0.0, 1.0)
 
-    # ------------------------------
+    # ---------------------------------------------------------
     # (7) Acceleration penalty
-    # ------------------------------
+    # ---------------------------------------------------------
     if hasattr(env, "_prev_q"):
         accel_penalty = torch.norm(q_current - 2 * env._prev_q + env._prev_q2, dim=1)
-        reward *= torch.exp(-0.3 * accel_penalty)
+        reward *= torch.exp(-0.5 * accel_penalty)
     env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
     env._prev_q = q_current.clone()
 
-    # ------------------------------
-    # (8) Exploration noise
-    # ------------------------------
-    reward += NOISE_WEIGHT * torch.rand_like(reward)
+    # ---------------------------------------------------------
+    # (8) Short moving average smoothing
+    # ---------------------------------------------------------
+    if not hasattr(env, "_reward_buffer"):
+        env._reward_buffer = []
+    env._reward_buffer.append(reward.clone())
+    if len(env._reward_buffer) > 3:
+        env._reward_buffer.pop(0)
+    reward = torch.mean(torch.stack(env._reward_buffer), dim=0)
 
-    # ------------------------------
-    # (9) Temporal smoothing (α=0.5)
-    # ------------------------------
-    alpha = 0.5
-    if hasattr(env, "_prev_reward"):
-        reward = alpha * env._prev_reward + (1 - alpha) * reward
-    env._prev_reward = reward.clone()
-
-    # ------------------------------
-    # (10) Clamp (0~1 for stability)
-    # ------------------------------
-    reward = torch.clamp(reward, 0.0, 1.0)
-
-    # ------------------------------
-    # (11) Logging
-    # ------------------------------
-    if current_step % 100 == 0:
-        print(f"[BC Tracking v9.2] Step {current_step:05d} | "
-              f"H={HORIZON}, γ={GAMMA}, σ={SIGMA}, w={TANH_WEIGHT}, v_w={VEL_WEIGHT}, "
+    # ---------------------------------------------------------
+    # (9) Logging — print every 10 steps, env 0 only
+    # ---------------------------------------------------------
+    if (env_ids[0] == 0) and (current_step % 10 == 0):
+        print(f"[BC Tracking v9.4] Step {current_step:05d} | "
+              f"H={H}, γ={GAMMA}, σ={SIGMA}, w={TANH_W}, v_w={VEL_W}, "
               f"mean_r={reward.mean().item():.4f}, std_r={reward.std().item():.4f}")
 
-    # ------------------------------
-    # (12) Plot history (every episode)
-    # ------------------------------
-    step = int(env._bc_step_counter)
-    q_target_now = env._bc_full_target[idx0].unsqueeze(0).to(env.device)
-    _joint_tracking_history.append(
-        (step, q_target_now[0].detach().cpu().numpy(), q_current[0].detach().cpu().numpy())
-    )
+    # ---------------------------------------------------------
+    # (10) Tracking history for plotting
+    # ---------------------------------------------------------
+    q_target_now = env._bc_full_target[idx0].unsqueeze(0)
+    _joint_tracking_history.append((
+        current_step,
+        q_target_now[0].detach().cpu().numpy(),
+        q_current[0].detach().cpu().numpy()
+    ))
 
+    # ---------------------------------------------------------
+    # (11) Episode-end plotting
+    # ---------------------------------------------------------
     env._bc_step_counter += 1
     if env._bc_step_counter >= episode_len_steps:
-        print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
+        if (env_ids[0] == 0):  # only once
+            if _joint_tracking_history:
+                steps, targets, currents = zip(*_joint_tracking_history)
+                targets = np.array(targets)
+                currents = np.array(currents)
 
-        if _joint_tracking_history:
-            steps, targets, currents = zip(*_joint_tracking_history)
-            targets = np.array(targets)
-            currents = np.array(currents)
+                plt.figure(figsize=(10, 6))
+                colors = plt.cm.tab10.colors
+                for j in range(targets.shape[1]):
+                    color = colors[j % len(colors)]
+                    plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=color, linewidth=1.2)
+                    plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=color, linewidth=2.0)
 
-            plt.figure(figsize=(10, 6))
-            colors = plt.cm.tab10.colors
-            for j in range(targets.shape[1]):
-                color = colors[j % len(colors)]
-                plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=color, linewidth=1.2)
-                plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=color, linewidth=2.0)
+                plt.xlabel("Step")
+                plt.ylabel("Joint Value (rad)")
+                plt.title("Joint Tracking (Target vs Current)")
+                plt.legend(ncol=2, fontsize=8)
+                plt.grid(True)
 
-            plt.xlabel("Step")
-            plt.ylabel("Joint Value (rad)")
-            plt.title("Joint Tracking (Target vs Current)")
-            plt.legend(ncol=2, fontsize=8)
-            plt.grid(True)
+                save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
+                os.makedirs(save_dir, exist_ok=True)
+                save_path = os.path.join(save_dir, f"bc_tracking_episode{_episode_counter}.png")
+                plt.savefig(save_path)
+                plt.close()
+                print(f"[INFO] Saved BC tracking plot to {save_path}")
 
-            save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
-            os.makedirs(save_dir, exist_ok=True)
-            save_path = os.path.join(save_dir, f"bc_tracking_episode{_episode_counter}.png")
-            plt.savefig(save_path)
-            plt.close()
-            print(f"[INFO] Saved BC tracking plot to {save_path}")
-
-            _episode_counter += 1
-            _joint_tracking_history.clear()
-
+                _episode_counter += 1
+                _joint_tracking_history.clear()
         env._bc_step_counter = 0
 
     return reward
