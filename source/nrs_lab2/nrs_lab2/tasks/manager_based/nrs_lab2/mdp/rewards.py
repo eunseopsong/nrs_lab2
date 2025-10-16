@@ -331,17 +331,15 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (Horizon-based v5 integrated)
+# Behavior Cloning trajectory tracking reward (Horizon-based v9 optimized)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
 import h5py
+from matplotlib import pyplot as plt
+import os
 
 def update_bc_target(env, env_ids=None):
-    import torch, h5py, numpy as np
-    from matplotlib import pyplot as plt
-    import os
-
     global _joint_tracking_history, _episode_counter
 
     if env_ids is None:
@@ -380,76 +378,109 @@ def update_bc_target(env, env_ids=None):
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
 
     # ------------------------------
-    # (Improved Reward v8 - Hybrid exponential + tanh shaping with discount normalization)
+    # (Improved Reward v9 - Temporal + Velocity-aware Hybrid, Optimized)
     # ------------------------------
     HORIZON = 10
     GAMMA = 0.9
-    SIGMA = 1.0        # reward sensitivity (너무 작으면 reward 소멸)
-    TANH_WEIGHT = 0.3  # tanh 항의 soft blending weight
+    SIGMA = 1.0
+    TANH_WEIGHT = 0.3
+    VEL_WEIGHT = 0.5   # ✅ 속도항 감쇠 비율 (너무 큰 보상 감소 방지)
 
-    # ✅ 현재 step 및 상태
     current_step = env._bc_step_counter
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
+    qdot_current = env.scene["robot"].data.joint_vel[env_ids, :6]
 
-    # ✅ normalization (if available)
     if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
         q_current = (q_current - env._bc_mean) / env._bc_std
 
-    # ✅ discounted hybrid reward 계산
     total_reward = torch.zeros(q_current.shape[0], device=env.device)
     total_traj_len = env._bc_full_target.shape[0]
 
-    t = current_step / episode_len_steps
-    idx_f = torch.tensor(t * (total_traj_len - 1), device=env.device)
-    idx0 = torch.floor(idx_f).long()
+    # ------------------------------
+    # (1) Trajectory time alignment
+    # ------------------------------
+    sim_time = current_step * dt * decimation
+    traj_time = torch.linspace(0, episode_length_s, total_traj_len, device=env.device)
+    scaled_idx = torch.argmin(torch.abs(traj_time - sim_time)).item()
+    idx0 = torch.tensor(scaled_idx, device=env.device)
 
-    for k in range(HORIZON):
-        idx_h = torch.clamp(idx0 + k, max=total_traj_len - 1)
-        q_target_h = env._bc_full_target[idx_h].unsqueeze(0).to(env.device)
-        if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
-            q_target_h = (q_target_h - env._bc_mean) / env._bc_std
+    # ------------------------------
+    # (2) Discounted hybrid reward (position + velocity)
+    # ------------------------------
+    with torch.no_grad():  # ✅ gradient 계산 비활성화로 성능 최적화
+        for k in range(HORIZON):
+            idx_h = torch.clamp(idx0 + k, max=total_traj_len - 1)
 
-        diff = q_current - q_target_h
-        error_norm = torch.norm(diff, dim=1)
+            # position / velocity targets
+            q_target_h = env._bc_full_target[idx_h].unsqueeze(0).to(env.device)
+            if idx_h > 0:
+                qdot_target_h = (env._bc_full_target[idx_h] - env._bc_full_target[idx_h - 1]).unsqueeze(0).to(env.device)
+            else:
+                qdot_target_h = torch.zeros_like(q_target_h)
 
-        # ✅ hybrid error shaping
-        hybrid_error = (1 - TANH_WEIGHT) * error_norm + TANH_WEIGHT * torch.tanh(error_norm / SIGMA)
+            if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
+                q_target_h = (q_target_h - env._bc_mean) / env._bc_std
 
-        reward_k = torch.exp(- (hybrid_error ** 2) / (2 * SIGMA ** 2))
-        total_reward += (GAMMA ** k) * reward_k
+            diff_q = q_current - q_target_h
+            diff_qdot = qdot_current - qdot_target_h
 
-    # ✅ normalization term (prevent discount collapse)
-    Z = (1 - GAMMA ** HORIZON)
-    reward = total_reward / Z
+            pos_error = torch.norm(diff_q, dim=1)
+            vel_error = torch.norm(diff_qdot, dim=1)
 
-    # ✅ smoothness penalty
+            # hybrid shaping
+            hybrid_error = (1 - TANH_WEIGHT) * pos_error + TANH_WEIGHT * torch.tanh(pos_error / SIGMA)
+
+            # ✅ per-joint temporal weight (mean across joints)
+            if idx_h > 0:
+                delta_target = torch.norm(env._bc_full_target[idx_h] - env._bc_full_target[idx_h - 1], dim=-1).mean()
+                temporal_weight = torch.exp(-delta_target ** 2 / (2 * 0.05 ** 2))
+            else:
+                temporal_weight = 1.0
+
+            reward_k = torch.exp(- (hybrid_error ** 2) / (2 * SIGMA ** 2))
+            reward_k *= torch.exp(-VEL_WEIGHT * vel_error) * temporal_weight
+
+            total_reward += (GAMMA ** k) * reward_k
+
+    # ------------------------------
+    # (3) Discount normalization
+    # ------------------------------
+    reward = total_reward / (1 - GAMMA ** HORIZON)
+
+    # ------------------------------
+    # (4) Smoothness penalty (acceleration-based)
+    # ------------------------------
     if hasattr(env, "_prev_q"):
         accel_penalty = torch.norm(q_current - 2 * env._prev_q + env._prev_q2, dim=1)
         reward *= torch.exp(-0.5 * accel_penalty)
     env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
     env._prev_q = q_current.clone()
 
-    # ✅ temporal smoothing
-    alpha = 0.5
-    if hasattr(env, "_prev_reward"):
-        reward = alpha * env._prev_reward + (1 - alpha) * reward
-    env._prev_reward = reward.clone()
+    # ------------------------------
+    # (5) Moving average smoothing (temporal reward stability)
+    # ------------------------------
+    if not hasattr(env, "_reward_buffer"):
+        env._reward_buffer = []
+    env._reward_buffer.append(reward.clone())
+    if len(env._reward_buffer) > 5:
+        env._reward_buffer.pop(0)
+    reward = torch.mean(torch.stack(env._reward_buffer), dim=0)
 
     reward = torch.clamp(reward, 0.0, 1.0)
 
-    # ✅ logging
+    # ------------------------------
+    # (6) Logging
+    # ------------------------------
     if current_step % 100 == 0:
-        print(f"[BC Tracking v8] Step {current_step:05d} | "
-              f"H={HORIZON}, γ={GAMMA}, σ={SIGMA}, w={TANH_WEIGHT}, mean_r={reward.mean().item():.4f}")
-
-
-
+        print(f"[BC Tracking v9-Optimized] Step {current_step:05d} | "
+              f"H={HORIZON}, γ={GAMMA}, σ={SIGMA}, w={TANH_WEIGHT}, v_w={VEL_WEIGHT}, "
+              f"mean_r={reward.mean().item():.4f}")
 
     # ------------------------------
-    # (5) 기록 (env 0 기준)
+    # (7) 기록 (env 0 기준)
     # ------------------------------
     step = int(env._bc_step_counter)
-    q_target_now = env._bc_full_target[idx0].unsqueeze(0).to(env.device)  # ✅ 현재 target 추가
+    q_target_now = env._bc_full_target[idx0].unsqueeze(0).to(env.device)
 
     _joint_tracking_history.append(
         (step,
@@ -458,7 +489,7 @@ def update_bc_target(env, env_ids=None):
     )
 
     # ------------------------------
-    # (6) Counter 및 출력
+    # (8) Counter 및 출력
     # ------------------------------
     env._bc_step_counter += 1
     if env._bc_step_counter % 100 == 0 or scaled_idx == total_traj_len - 1:
@@ -466,7 +497,7 @@ def update_bc_target(env, env_ids=None):
         print(f"[BC Tracking] Dataset index {scaled_idx+1}/{total_traj_len} ({percent:.1f}%), mean_r={reward.mean():.4f}")
 
     # ------------------------------
-    # (7) 시각화 및 리셋
+    # (9) 시각화 및 리셋
     # ------------------------------
     if env._bc_step_counter >= episode_len_steps:
         print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
