@@ -331,7 +331,7 @@ def load_bc_trajectory(env, env_ids, seq_len: int = 10):
 
 
 # -----------------------------------------------------------------------------
-# Behavior Cloning trajectory tracking reward (scaled over full episode)
+# Behavior Cloning trajectory tracking reward (Horizon-based v5 integrated)
 # -----------------------------------------------------------------------------
 import torch
 import numpy as np
@@ -352,9 +352,9 @@ def update_bc_target(env, env_ids=None):
     # ------------------------------
     dt = getattr(env.sim, "dt", 1.0 / 60.0)
     decimation = getattr(env, "decimation", 2)
-    episode_length_s = 60.0                          # ✅ 60초로 고정
+    episode_length_s = 60.0
     env.cfg.episode_length_s = episode_length_s
-    episode_len_steps = int(episode_length_s / (dt * decimation))  # 시뮬 step 수 (예: 1800)
+    episode_len_steps = int(episode_length_s / (dt * decimation))
 
     # ------------------------------
     # (2) Trajectory 로드
@@ -367,68 +367,56 @@ def update_bc_target(env, env_ids=None):
         env._bc_step_counter = 0
         print(f"[INFO] Loaded HDF5 trajectory of shape {env._bc_full_target.shape}")
 
-    # ✅ 타입 강제 변환 (numpy → torch)
     if isinstance(env._bc_full_target, np.ndarray):
         env._bc_full_target = torch.tensor(env._bc_full_target, dtype=torch.float32, device=env.device)
 
-    total_traj_len = env._bc_full_target.shape[0]  # 전체 데이터 길이 (예: 5758)
+    total_traj_len = env._bc_full_target.shape[0]
 
     # ------------------------------
-    # (3) Trajectory index scaling
+    # (3) Index scaling
     # ------------------------------
     current_step = env._bc_step_counter
     scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
 
-
-
-
     # ------------------------------
-    # (Improved Reward v4 - Lookahead Target Alignment)
+    # (4) Horizon-based discounted reward (v5 logic)
     # ------------------------------
+    HORIZON = 5
+    GAMMA = 0.9
+    SIGMA = 0.3
 
-    # ✅ lookahead offset 설정 (미래 target 참조)
-    LOOKAHEAD_STEPS = 5  # 예: 5 step ≈ 0.1초
-    # ratio = total_traj_len / episode_len_steps
+    # ✅ 시간 스케일링
     t = current_step / episode_len_steps
-
-    # ✅ 현재 인덱스 계산
     idx_f = torch.tensor(t * (total_traj_len - 1), device=env.device)
     idx0 = torch.floor(idx_f).long()
 
-    # ✅ lookahead 적용
-    idx_future = torch.clamp(idx0 + LOOKAHEAD_STEPS, max=total_traj_len - 1)
-
-    # ✅ 보간 (선형)
-    idx1 = torch.clamp(idx_future + 1, max=total_traj_len - 1)
-    w = idx_f - idx0.float()
-    q_target = (1 - w) * env._bc_full_target[idx_future] + w * env._bc_full_target[idx1]
-    q_target = q_target.unsqueeze(0)
-
-    # ✅ 현재 상태
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
 
-    # ✅ normalization (if available)
     if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
-        q_target = (q_target - env._bc_mean) / env._bc_std
         q_current = (q_current - env._bc_mean) / env._bc_std
 
-    # ✅ position error (future target 대비)
-    diff_pos = q_current - q_target
-    error = torch.norm(diff_pos, dim=1)
+    total_reward = torch.zeros(q_current.shape[0], device=env.device)
+    for k in range(HORIZON):
+        idx_h = torch.clamp(idx0 + k, max=total_traj_len - 1)
+        q_target_h = env._bc_full_target[idx_h].unsqueeze(0).to(env.device)
+        if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
+            q_target_h = (q_target_h - env._bc_mean) / env._bc_std
 
-    # ✅ exponential reward
-    sigma = 0.3
-    reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
+        diff = q_current - q_target_h
+        error = torch.norm(diff, dim=1)
+        reward_k = torch.exp(- (error ** 2) / (2 * SIGMA ** 2))
+        total_reward += (GAMMA ** k) * reward_k
 
-    # ✅ smoothness term 추가 (optional)
+    reward = total_reward / HORIZON
+
+    # ✅ smoothness penalty
     if hasattr(env, "_prev_q"):
         accel_penalty = torch.norm(q_current - 2 * env._prev_q + env._prev_q2, dim=1)
         reward *= torch.exp(-0.5 * accel_penalty)
     env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
     env._prev_q = q_current.clone()
 
-    # ✅ final reward smoothing
     alpha = 0.5
     if hasattr(env, "_prev_reward"):
         reward = alpha * env._prev_reward + (1 - alpha) * reward
@@ -436,18 +424,11 @@ def update_bc_target(env, env_ids=None):
 
     reward = torch.clamp(reward, 0.0, 1.0)
 
-    # ✅ logging (optional)
+    # ✅ 현재 horizon의 첫 target 저장 (for history)
+    q_target = env._bc_full_target[idx0].unsqueeze(0).to(env.device)
+
     if current_step % 100 == 0:
-        percent = (idx_future.item() + 1) / total_traj_len * 100
-        print(f"[BC Tracking] Future index {idx_future.item()+1}/{total_traj_len} ({percent:.1f}%), mean error={error.mean().item():.4f}")
-
-
-
-
-
-
-
-
+        print(f"[BC Tracking v5] Step {current_step:05d} | H={HORIZON}, γ={GAMMA}, mean_r={reward.mean().item():.4f}")
 
     # ------------------------------
     # (5) 기록 (env 0 기준)
@@ -463,15 +444,14 @@ def update_bc_target(env, env_ids=None):
     env._bc_step_counter += 1
     if env._bc_step_counter % 100 == 0 or scaled_idx == total_traj_len - 1:
         percent = (scaled_idx / total_traj_len) * 100
-        print(f"[BC Tracking] Dataset index {scaled_idx+1}/{total_traj_len} ({percent:.1f}%), mean error={error.mean():.4f}")
+        print(f"[BC Tracking] Dataset index {scaled_idx+1}/{total_traj_len} ({percent:.1f}%), mean_r={reward.mean():.4f}")
 
     # ------------------------------
-    # (7) 에피소드 종료 시 시각화 및 리셋
+    # (7) 시각화 및 리셋
     # ------------------------------
     if env._bc_step_counter >= episode_len_steps:
         print("[BC Loader] 🔁 Reloading BC trajectory for new episode...")
 
-        # ✅ 시각화 저장
         if _joint_tracking_history:
             steps, targets, currents = zip(*_joint_tracking_history)
             targets = np.array(targets)
@@ -500,7 +480,6 @@ def update_bc_target(env, env_ids=None):
             _episode_counter += 1
             _joint_tracking_history.clear()
 
-        # ✅ 리셋
         env._bc_step_counter = 0
 
     return reward
