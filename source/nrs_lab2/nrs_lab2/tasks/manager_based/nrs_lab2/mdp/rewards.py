@@ -384,26 +384,28 @@ def update_bc_target(env, env_ids=None):
 
 
     # ------------------------------
-    # (Improved Reward v3 - Stable Convergence + Fixed Tensor Type + Safe Logging)
+    # (Improved Reward v4 - Lookahead Target Alignment)
     # ------------------------------
 
-    # ✅ Step-based interpolation for trajectory alignment
-    ratio = total_traj_len / episode_len_steps
+    # ✅ lookahead offset 설정 (미래 target 참조)
+    LOOKAHEAD_STEPS = 5  # 예: 5 step ≈ 0.1초
+    # ratio = total_traj_len / episode_len_steps
     t = current_step / episode_len_steps
 
-    # torch tensor 변환
+    # ✅ 현재 인덱스 계산
     idx_f = torch.tensor(t * (total_traj_len - 1), device=env.device)
-
-    # torch 연산으로 인덱싱 처리
     idx0 = torch.floor(idx_f).long()
-    idx1 = torch.clamp(idx0 + 1, max=total_traj_len - 1)
-    w = idx_f - idx0.float()
 
-    # ✅ safe interpolation
-    q_target = (1 - w) * env._bc_full_target[idx0] + w * env._bc_full_target[idx1]
+    # ✅ lookahead 적용
+    idx_future = torch.clamp(idx0 + LOOKAHEAD_STEPS, max=total_traj_len - 1)
+
+    # ✅ 보간 (선형)
+    idx1 = torch.clamp(idx_future + 1, max=total_traj_len - 1)
+    w = idx_f - idx0.float()
+    q_target = (1 - w) * env._bc_full_target[idx_future] + w * env._bc_full_target[idx1]
     q_target = q_target.unsqueeze(0)
 
-    # ✅ 현재 joint 상태
+    # ✅ 현재 상태
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
 
     # ✅ normalization (if available)
@@ -411,45 +413,37 @@ def update_bc_target(env, env_ids=None):
         q_target = (q_target - env._bc_mean) / env._bc_std
         q_current = (q_current - env._bc_mean) / env._bc_std
 
-    # ✅ position difference
+    # ✅ position error (future target 대비)
     diff_pos = q_current - q_target
-    error_joint = torch.abs(diff_pos)
-    error_norm = torch.norm(diff_pos, dim=1, keepdim=True)
+    error = torch.norm(diff_pos, dim=1)
 
-    # ✅ Adaptive sigma (keeps gradient alive even for large errors)
-    sigma_adapt = 0.2 + 0.8 * torch.tanh(3.0 * error_norm)
-    reward_joint = torch.exp(- (error_joint ** 2) / (2 * sigma_adapt ** 2))
-    reward_pos = reward_joint.mean(dim=1)
+    # ✅ exponential reward
+    sigma = 0.3
+    reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
 
-    # ✅ Smoothness term (acceleration penalty)
+    # ✅ smoothness term 추가 (optional)
     if hasattr(env, "_prev_q"):
-        accel_penalty = torch.norm((q_current - 2 * env._prev_q + env._prev_q2), dim=1)
-        reward_smooth = torch.exp(-accel_penalty)
-    else:
-        reward_smooth = torch.ones_like(reward_pos)
-
-    # prev_q 업데이트
+        accel_penalty = torch.norm(q_current - 2 * env._prev_q + env._prev_q2, dim=1)
+        reward *= torch.exp(-0.5 * accel_penalty)
     env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
     env._prev_q = q_current.clone()
 
-    # ✅ Combined reward
-    reward = 0.7 * reward_pos + 0.3 * reward_smooth
-    reward = torch.clamp(reward, 0.0, 1.0)
-
-    # ✅ position error norm (for logging)
-    error = torch.norm(diff_pos, dim=1)
-
-    # ✅ Logging progress (every 100 steps)
-    if current_step % 100 == 0:
-        percent = (idx0.item() + 1) / total_traj_len * 100
-        print(f"[BC Tracking] Dataset index {idx0.item()+1}/{total_traj_len} ({percent:.1f}%), mean error={error.mean().item():.4f}")
-
-    # ✅ Temporal smoothing (reward history blending)
+    # ✅ final reward smoothing
     alpha = 0.5
     if hasattr(env, "_prev_reward"):
         reward = alpha * env._prev_reward + (1 - alpha) * reward
     env._prev_reward = reward.clone()
+
     reward = torch.clamp(reward, 0.0, 1.0)
+
+    # ✅ logging (optional)
+    if current_step % 100 == 0:
+        percent = (idx_future.item() + 1) / total_traj_len * 100
+        print(f"[BC Tracking] Future index {idx_future.item()+1}/{total_traj_len} ({percent:.1f}%), mean error={error.mean().item():.4f}")
+
+
+
+
 
 
 
