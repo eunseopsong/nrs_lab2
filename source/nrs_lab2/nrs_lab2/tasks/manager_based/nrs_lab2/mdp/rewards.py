@@ -380,64 +380,76 @@ def update_bc_target(env, env_ids=None):
     scaled_idx = int((current_step / episode_len_steps) * total_traj_len)
     scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
 
+
+
+
     # ------------------------------
-    # (4) Improved Exponential Reward (Enhanced for q2, q4)
+    # (Improved Reward v3 - Stable Convergence + Fixed Tensor Type + Safe Logging)
     # ------------------------------
-    # ✅ Trajectory scaling 보정 (정확도 향상)
-    ratio = (total_traj_len - 1) / (episode_len_steps - 1)
-    scaled_idx = int(round(current_step * ratio))
-    scaled_idx = max(0, min(scaled_idx, total_traj_len - 1))
 
+    # ✅ Step-based interpolation for trajectory alignment
+    ratio = total_traj_len / episode_len_steps
+    t = current_step / episode_len_steps
 
+    # torch tensor 변환
+    idx_f = torch.tensor(t * (total_traj_len - 1), device=env.device)
 
-    # ✅ 현재 상태 및 타겟 로드
-    q_target = env._bc_full_target[scaled_idx].unsqueeze(0)
+    # torch 연산으로 인덱싱 처리
+    idx0 = torch.floor(idx_f).long()
+    idx1 = torch.clamp(idx0 + 1, max=total_traj_len - 1)
+    w = idx_f - idx0.float()
+
+    # ✅ safe interpolation
+    q_target = (1 - w) * env._bc_full_target[idx0] + w * env._bc_full_target[idx1]
+    q_target = q_target.unsqueeze(0)
+
+    # ✅ 현재 joint 상태
     q_current = env.scene["robot"].data.joint_pos[env_ids, :6]
-    qdot_current = env.scene["robot"].data.joint_vel[env_ids, :6]
 
-    # ✅ velocity target (finite difference)
-    if scaled_idx < env._bc_full_target.shape[0] - 1:
-        qdot_target = (env._bc_full_target[scaled_idx+1] - env._bc_full_target[scaled_idx]) / (dt * decimation)
-    else:
-        qdot_target = torch.zeros_like(q_current)
+    # ✅ normalization (if available)
+    if hasattr(env, "_bc_mean") and hasattr(env, "_bc_std"):
+        q_target = (q_target - env._bc_mean) / env._bc_std
+        q_current = (q_current - env._bc_mean) / env._bc_std
 
-    # ✅ joint별 weight (q2, q4 보상 강화)
-    joint_weights = torch.tensor([1.0, 1.4, 1.0, 1.3, 1.0, 1.0], device=env.device)
-
-    # ✅ joint별 sigma (큰 joint 오차에 대해 gradient 유지)
-    sigma_base = torch.tensor([0.2, 0.35, 0.2, 0.35, 0.2, 0.2], device=env.device)
-    kappa = 2.5
-
-    # ✅ position / velocity error
-    diff_pos = (q_current - q_target) * joint_weights
-    diff_vel = qdot_current - qdot_target
-
-    # ✅ per-joint exponential kernel (position)
+    # ✅ position difference
+    diff_pos = q_current - q_target
     error_joint = torch.abs(diff_pos)
-    reward_joint = torch.exp(- (error_joint ** 2) / (2 * sigma_base ** 2)) / (1 + kappa * error_joint)
+    error_norm = torch.norm(diff_pos, dim=1, keepdim=True)
+
+    # ✅ Adaptive sigma (keeps gradient alive even for large errors)
+    sigma_adapt = 0.2 + 0.8 * torch.tanh(3.0 * error_norm)
+    reward_joint = torch.exp(- (error_joint ** 2) / (2 * sigma_adapt ** 2))
     reward_pos = reward_joint.mean(dim=1)
 
-    # ✅ velocity-based reward (보조항)
-    error_vel = torch.norm(diff_vel, dim=1)
-    sigma_vel = 2 * sigma_base.mean()  # velocity는 완화된 sigma 사용
-    reward_vel = torch.exp(- (error_vel ** 2) / (2 * sigma_vel ** 2))
+    # ✅ Smoothness term (acceleration penalty)
+    if hasattr(env, "_prev_q"):
+        accel_penalty = torch.norm((q_current - 2 * env._prev_q + env._prev_q2), dim=1)
+        reward_smooth = torch.exp(-accel_penalty)
+    else:
+        reward_smooth = torch.ones_like(reward_pos)
 
-    # ✅ combined reward (velocity 비중 증가)
-    reward = 0.6 * reward_pos + 0.4 * reward_vel
+    # prev_q 업데이트
+    env._prev_q2 = getattr(env, "_prev_q", q_current.clone())
+    env._prev_q = q_current.clone()
+
+    # ✅ Combined reward
+    reward = 0.7 * reward_pos + 0.3 * reward_smooth
+    reward = torch.clamp(reward, 0.0, 1.0)
 
     # ✅ position error norm (for logging)
     error = torch.norm(diff_pos, dim=1)
 
-    # ✅ temporal smoothness
-    alpha = 0.8
+    # ✅ Logging progress (every 100 steps)
+    if current_step % 100 == 0:
+        percent = (idx0.item() + 1) / total_traj_len * 100
+        print(f"[BC Tracking] Dataset index {idx0.item()+1}/{total_traj_len} ({percent:.1f}%), mean error={error.mean().item():.4f}")
+
+    # ✅ Temporal smoothing (reward history blending)
+    alpha = 0.5
     if hasattr(env, "_prev_reward"):
         reward = alpha * env._prev_reward + (1 - alpha) * reward
     env._prev_reward = reward.clone()
-
-    reward = torch.clamp(reward, 1e-5, 1.0)
-    reward = torch.log1p(10 * reward) / torch.log1p(torch.tensor(10.0, device=reward.device))
-
-
+    reward = torch.clamp(reward, 0.0, 1.0)
 
 
 
