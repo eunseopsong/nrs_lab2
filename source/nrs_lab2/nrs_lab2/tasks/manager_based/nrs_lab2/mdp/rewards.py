@@ -117,7 +117,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     joint_min, joint_max = _joint_bounds
 
     # ------------------------------
-    # (2) Base Reward 계산 (exp 커널 평탄화)
+    # (2) Base Reward 계산 (exp 커널 평탄화 + Integral Error Term)
     # ------------------------------
     joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)
     vel_weight = 0.3
@@ -126,15 +126,36 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     next_target = future_targets[:, D:2*D] if future_targets.shape[1] >= 2*D else future_targets[:, :D]
     diff = q - next_target
 
+    # Position reward
     weighted_sq = joint_weights * (diff ** 2)
     sq_norm = torch.sum(weighted_sq, dim=1)
     rew_pos = torch.exp(-sq_norm / (sigma ** 2))
 
+    # Velocity reward
     diff_dot = qd
     vel_norm = torch.norm(diff_dot, dim=1)
     rew_vel = torch.exp(-vel_norm / (sigma ** 2))
 
+    # Base reward (7:3 비율)
     base_reward = pos_weight * rew_pos + vel_weight * rew_vel
+
+    # ------------------------------
+    # (2-1) Integral Error Term (steady-state error 제거)
+    # ------------------------------
+    if not hasattr(env, "_integral_error"):
+        env._integral_error = torch.zeros_like(base_reward)
+
+    # 누적 오차 업데이트 (지수 감쇠)
+    beta = 0.98  # 0.95~0.99 권장 (감쇠율)
+    env._integral_error = beta * env._integral_error + torch.norm(diff, dim=1)
+
+    # integral penalty (steady-state error 방지)
+    k_i = 0.2  # integral 강도 (0.1~0.3 권장)
+    integral_penalty = k_i * env._integral_error
+
+    # 보상에서 감산
+    base_reward = base_reward - integral_penalty
+
 
     # ------------------------------
     # (3) Convergence Boost Reward 추가
@@ -201,7 +222,7 @@ def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 3
         return torch.zeros_like(current_reward)
 
     reward_delta = current_reward - _prev_total_reward
-    reward_boost = alpha * torch.tanh(reward_delta)
+    reward_boost = alpha * torch.clamp(torch.tanh(reward_delta), min=0.0) # positive delta에 대해서만 보상 (B9)
     _prev_total_reward = current_reward.clone()
 
     return reward_boost
