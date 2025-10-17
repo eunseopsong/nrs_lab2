@@ -167,23 +167,24 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     # (4) 완화된 Boundary Penalty
     # ------------------------------
     # margin을 두어 약간의 초과는 허용
-    margin = 0.2
-    overflow_low = torch.clamp(joint_min - q, min=0.0)
-    overflow_high = torch.clamp(q - joint_max, min=0.0)
-    overflow = overflow_low + overflow_high
+    # margin = 0.2
+    # overflow_low = torch.clamp(joint_min - q, min=0.0)
+    # overflow_high = torch.clamp(q - joint_max, min=0.0)
+    # overflow = overflow_low + overflow_high
 
-    # overflow 합산 (joint별로 weighted 평균)
-    overflow_norm = torch.sum(overflow * joint_weights, dim=1)
+    # # overflow 합산 (joint별로 weighted 평균)
+    # overflow_norm = torch.sum(overflow * joint_weights, dim=1)
 
-    # ✅ 완화된 penalty (k값 ↓)
-    k = 6.0
-    # ✅ boundary_penalty: 정상(0), 벗어날수록 1에 가까움
-    boundary_penalty = 1.0 - torch.exp(-k * overflow_norm)
+    # # ✅ 완화된 penalty (k값 ↓)
+    # k = 6.0
+    # # ✅ boundary_penalty: 정상(0), 벗어날수록 1에 가까움
+    # boundary_penalty = 1.0 - torch.exp(-k * overflow_norm)
 
-    # 감산형 penalty 적용 (reward 감소)
-    total_reward = (base_reward + boost_reward) * (1.0 - boundary_penalty)
-    total_reward = torch.clamp(total_reward, min=0.0)
+    # # 감산형 penalty 적용 (reward 감소)
+    # total_reward = (base_reward + boost_reward) * (1.0 - boundary_penalty)
+    # total_reward = torch.clamp(total_reward, min=0.0)
 
+    total_reward = base_reward
 
     # ------------------------------
     # (5) 디버깅 출력 (매 100 step)
@@ -201,7 +202,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
         # print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}")
         print(f"  Reward_pos: {rew_pos[0].item():.6f}")
         print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}")
-        print(f"  Penalty: {1.0 - boundary_penalty[0].item():.6f}, Final Reward: {total_reward[0].item():.6f}")
+        # print(f"  Penalty: {1.0 - boundary_penalty[0].item():.6f}, Final Reward: {total_reward[0].item():.6f}")
 
     # ------------------------------
     # (6) History 저장
