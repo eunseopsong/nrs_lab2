@@ -76,28 +76,7 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 
 
 # -------------------
-# Joint tracking reward (현재 + 미래 5-step 감쇠 포함, 시각화 연동)
-# -------------------
-
-import matplotlib
-matplotlib.use("Agg")   # ✅ headless 환경에서도 저장되게 강제
-
-# -------------------
-# Joint tracking reward (exp kernel + velocity term)
-# -------------------
-
-import matplotlib
-matplotlib.use("Agg")
-
-# -------------------
-# Joint tracking reward (exp kernel + velocity term, no discounting)
-# -------------------
-
-import matplotlib
-matplotlib.use("Agg")
-
-# -------------------
-# Joint tracking reward (Gaussian kernel flattening)
+# Joint tracking reward (Gaussian kernel flattening + strong boundary penalty)
 # + Convergence boost term (meta reward)
 # -------------------
 
@@ -107,7 +86,7 @@ matplotlib.use("Agg")
 _prev_total_reward = None  # 전역 변수로 이전 step reward 저장
 
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: float = 1.0):
+def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: float = 3.0):
     global _joint_tracking_history, _episode_counter, _prev_total_reward
 
     # ------------------------------
@@ -147,10 +126,36 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     # (2) Convergence Boost Reward 추가
     # ------------------------------
     boost_reward = reward_convergence_boost(env, base_reward, alpha)
-    total_reward = base_reward + 0.5 * boost_reward  # boost 가중치 0.5
+    total_reward = base_reward + boost_reward
 
     # ------------------------------
-    # (3) 디버깅 출력 (매 100 step)
+    # (3) Boundary Penalty (joint range 기반)
+    # ------------------------------
+    import h5py, os
+    if not hasattr(env, "_joint_range_min"):
+        path = os.path.expanduser("~/nrs_lab2/datasets/joint_recording.h5")
+        with h5py.File(path, "r") as f:
+            joint_data = f["joint_target"][:]  # (N, 6)
+            env._joint_range_min = torch.tensor(joint_data.min(axis=0), dtype=torch.float32, device=env.device)
+            env._joint_range_max = torch.tensor(joint_data.max(axis=0), dtype=torch.float32, device=env.device)
+        print("[INFO] ✅ Loaded joint range min/max from HDF5")
+
+    # strong exponential boundary penalty
+    k = 25.0  # penalty steepness (값이 클수록 매우 강하게 제재)
+    penalty = torch.ones(num_envs, device=env.device)
+    for i in range(D):
+        q_i = q[:, i]
+        q_min = env._joint_range_min[i]
+        q_max = env._joint_range_max[i]
+        over = torch.clamp(q_i - q_max, min=0.0)
+        under = torch.clamp(q_min - q_i, min=0.0)
+        penalty *= torch.exp(-k * (over ** 2 + under ** 2))
+
+    # penalty 적용
+    total_reward = total_reward * penalty
+
+    # ------------------------------
+    # (4) 디버깅 출력 (매 100 step)
     # ------------------------------
     step = int(env.common_step_counter)
     if step % 100 == 0:
@@ -160,22 +165,24 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
         print(f"  Current joints: {q[0].detach().cpu().numpy()}")
         print(f"  Error (‖q - q*‖): {err_norm:.6f}")
         print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}")
-        print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}, Final: {total_reward[0].item():.6f}")
+        print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}")
+        print(f"  Penalty: {penalty[0].item():.6f}, Final Reward: {total_reward[0].item():.6f}")
 
     # ------------------------------
-    # (4) History 저장
+    # (5) History 저장
     # ------------------------------
     target_now = next_target[0].detach().cpu().numpy()
     current_now = q[0].detach().cpu().numpy()
     _joint_tracking_history.append((step, target_now, current_now))
 
     # ------------------------------
-    # (5) Episode 종료 시 시각화
+    # (6) Episode 종료 시 시각화
     # ------------------------------
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         if step > 0 and step % int(env.max_episode_length) == 0:
             if _joint_tracking_history:
                 save_joint_tracking_plot(env)
+            _prev_total_reward = None  # ✅ 다음 episode 대비 reset
 
     return total_reward
 
@@ -188,19 +195,16 @@ def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 3
     강화된 수렴 보상 (Reward Improvement Term)
     - 이전 step보다 reward_pos가 커지면 positive boost
     - 감소하면 penalty 적용
-    - alpha: 보상 강도 (0.5~2.0 권장)
+    - alpha: 보상 강도 (0.5~3.0 권장)
     """
     global _prev_total_reward
 
-    # 초기 step인 경우 0으로 시작
     if _prev_total_reward is None:
         _prev_total_reward = current_reward.clone()
         return torch.zeros_like(current_reward)
 
-    # reward 변화량 계산
     reward_delta = current_reward - _prev_total_reward
     reward_boost = alpha * torch.tanh(reward_delta)
-
     _prev_total_reward = current_reward.clone()
     return reward_boost
 
