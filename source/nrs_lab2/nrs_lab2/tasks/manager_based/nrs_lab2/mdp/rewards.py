@@ -225,17 +225,31 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
 # Reward improvement (meta reward)
 # --------------------------------
 def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 3.0):
+    """
+    강화된 수렴 보상 (Reward Improvement Term)
+    - 이전 step보다 reward_pos가 커지면 positive boost
+    - 감소하면 penalty 적용
+    - alpha: 보상 강도 (0.5~3.0 권장)
+    - ✅ episode 초기화 시에도 _prev_total_reward 유지
+    """
     global _prev_total_reward
 
-    if _prev_total_reward is None:
+    # IsaacLab의 env.reset() 시점에서도 유지되도록 None 체크 완화
+    if _prev_total_reward is None or torch.isnan(current_reward).any():
         _prev_total_reward = current_reward.clone()
         return torch.zeros_like(current_reward)
 
+    # reward 변화량 계산
     reward_delta = current_reward - _prev_total_reward
-    reward_boost = alpha * torch.clamp(torch.tanh(reward_delta), min=0.0) # positive delta에 대해서만 보상 (B9)
-    _prev_total_reward = current_reward.clone()
+    reward_boost = alpha * torch.clamp(torch.tanh(reward_delta), min=0.0)  # ✅ positive delta만 boost
+
+    # ✅ episode reset 시에도 유지되도록 단순 clone이 아닌 EMA 형태로 누적
+    beta = 0.98  # 0.95~0.99 권장
+    _prev_total_reward = beta * _prev_total_reward + (1 - beta) * current_reward
 
     return reward_boost
+
+
 
 
 
