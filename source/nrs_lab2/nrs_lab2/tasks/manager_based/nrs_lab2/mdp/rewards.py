@@ -103,7 +103,7 @@ matplotlib.use("Agg")
 import matplotlib
 matplotlib.use("Agg")
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 0.5):
+def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0):
     global _joint_tracking_history, _episode_counter
 
     # ------------------------------
