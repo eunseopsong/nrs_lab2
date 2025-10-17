@@ -184,7 +184,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     # total_reward = (base_reward + boost_reward) * (1.0 - boundary_penalty)
     # total_reward = torch.clamp(total_reward, min=0.0)
 
-    total_reward = base_reward
+    total_reward = base_reward + boost_reward
 
     # ------------------------------
     # (5) 디버깅 출력 (매 100 step)
@@ -226,40 +226,32 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
 # --------------------------------
 # Reward improvement (meta reward)
 # --------------------------------
-def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 2.0, sensitivity: float = 0.1):
+def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 6.0, sensitivity: float = 0.2):
     """
-    강화된 수렴 보상 (Reward Improvement Term, exponential kernel, no EMA)
-    - 이전 step보다 reward_pos가 커지면 positive boost
-    - 감소하면 penalty (음수 포함)
-    - alpha: 보상 강도 (3.0~10.0 권장)
-    - sensitivity: exp 변화 감도 (0.05~0.2 권장)
-    - ✅ EMA 제거: step 간 즉각적 변화에 민감하게 반응
+    안정화된 수렴 보상 (Soft Exponential kernel)
+    - 작은 Δreward → 선형 증가
+    - 큰 Δreward → 포화(saturate) → 진동 방지
+    - alpha: 보상 강도
+    - sensitivity: 민감도 (클수록 완화)
     """
     global _prev_total_reward
 
-    # 초기화 (첫 step or NaN 방지)
     if _prev_total_reward is None or torch.isnan(current_reward).any():
         _prev_total_reward = current_reward.clone()
         return torch.zeros_like(current_reward)
 
-    # ------------------------------
-    # (1) Reward 변화량 계산
-    # ------------------------------
+    # Reward 변화량
     reward_delta = current_reward - _prev_total_reward
 
-    # ------------------------------
-    # (2) Exponential kernel 기반 boost (EMA 제거)
-    # ------------------------------
-    # Δ > 0 → exp(+) > 1 → positive boost
-    # Δ < 0 → exp(-) < 1 → negative penalty
-    reward_boost = alpha * (torch.exp(reward_delta / sensitivity) - 1.0)
+    # Soft exponential kernel (exp 대신 tanh 기반)
+    # exp 커널의 과도한 폭발 방지용 -> 부호 유지 + saturation
+    reward_boost = alpha * torch.tanh(reward_delta / sensitivity)
 
-    # ------------------------------
-    # (3) 다음 step 기준 업데이트
-    # ------------------------------
+    # 업데이트
     _prev_total_reward = current_reward.clone()
 
     return reward_boost
+
 
 
 

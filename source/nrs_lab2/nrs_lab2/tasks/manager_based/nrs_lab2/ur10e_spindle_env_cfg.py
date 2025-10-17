@@ -216,7 +216,7 @@ class RewardsCfg:
         weight=1.0,
         params={
             "sigma": 2.0,   # exp(-||e||² / σ²) 평탄화 계수
-            "alpha": 2.0,   # convergence boost 강도
+            "alpha": 6.0,   # convergence boost 강도
         },
     )
 
