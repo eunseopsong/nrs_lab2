@@ -30,14 +30,23 @@ EE_FRAME_NAME = "wrist_3_link"        # end-effector frame in your USD
 # -----------------------------------------------------------------------------
 # Home pose (rad)
 # -----------------------------------------------------------------------------
+# UR10E_HOME_DICT = {
+#     "shoulder_pan_joint": 0.0,
+#     "shoulder_lift_joint": -1.57079632679,
+#     "elbow_joint": -1.57079632679,
+#     "wrist_1_joint": -1.57079632679,
+#     "wrist_2_joint": 1.57079632679,
+#     "wrist_3_joint": 0.0,
+# }
 UR10E_HOME_DICT = {
-    "shoulder_pan_joint": 0.0,
-    "shoulder_lift_joint": -1.57079632679,
-    "elbow_joint": -1.57079632679,
-    "wrist_1_joint": -1.57079632679,
-    "wrist_2_joint": 1.57079632679,
-    "wrist_3_joint": 0.0,
+    "shoulder_pan_joint": -0.450591,
+    "shoulder_lift_joint": -1.39945,
+    "elbow_joint": -1.96593,
+    "wrist_1_joint": -1.54392,
+    "wrist_2_joint": 1.4757,
+    "wrist_3_joint": 0.33463,
 }
+
 
 # Actuator joint list (exact names expected in the USD)
 UR10E_ARM_JOINTS = [
