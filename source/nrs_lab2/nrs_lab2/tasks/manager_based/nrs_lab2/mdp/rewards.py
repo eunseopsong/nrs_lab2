@@ -89,50 +89,55 @@ matplotlib.use("Agg")   # ✅ headless 환경에서도 저장되게 강제
 import matplotlib
 matplotlib.use("Agg")
 
+# -------------------
+# Joint tracking reward (exp kernel + velocity term, no discounting)
+# -------------------
+
+import matplotlib
+matplotlib.use("Agg")
+
 def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 10):
     global _joint_tracking_history, _episode_counter
 
     # ------------------------------
-    # (0) 현재 joint 상태
+    # (0) 현재 상태
     # ------------------------------
     q = env.scene["robot"].data.joint_pos[:, :6]
     qd = env.scene["robot"].data.joint_vel[:, :6]
     future_targets = get_hdf5_target_future(env, horizon=horizon)
 
     num_envs, D = q.shape
-    horizon = min(horizon, future_targets.shape[1] // D)
     total_reward = torch.zeros(num_envs, device=env.device)
 
     # ------------------------------
     # (1) Reward 계산 (joint별 가중치 + velocity term)
     # ------------------------------
-    joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)  # q2, q4 ↑ / q6 ↓
-    vel_weight = 0.3   # rew_vel 비중
-    pos_weight = 0.7   # rew_pos 비중
+    joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)
+    vel_weight = 0.3
+    pos_weight = 0.7
 
-    for k in range(horizon):
-        target_k = future_targets[:, k*D:(k+1)*D]
-        diff = q - target_k
+    # ✅ diff = q(t) - q*(t+1)
+    next_target = future_targets[:, D:2*D] if future_targets.shape[1] >= 2*D else future_targets[:, :D]
+    diff = q - next_target
 
-        # position term
-        weighted_sq = joint_weights * (diff ** 2)
-        sq_norm = torch.sum(weighted_sq, dim=1)
-        rew_pos = torch.exp(-sq_norm)  # exp(-‖e‖²)
+    # position term
+    weighted_sq = joint_weights * (diff ** 2)
+    sq_norm = torch.sum(weighted_sq, dim=1)
+    rew_pos = torch.exp(-sq_norm)
 
-        # velocity term (목표 속도는 0으로 가정)
-        diff_dot = qd  # q̇* = 0
-        vel_norm = torch.norm(diff_dot, dim=1)
-        rew_vel = torch.exp(-vel_norm)  # exp(-‖ė‖)
+    # velocity term (목표 속도 = 0)
+    diff_dot = qd
+    vel_norm = torch.norm(diff_dot, dim=1)
+    rew_vel = torch.exp(-vel_norm)
 
-        # position:velocity = 7:3
-        rew_combined = pos_weight * rew_pos + vel_weight * rew_vel
-        total_reward += (gamma ** k) * rew_combined
+    # position:velocity = 7:3
+    total_reward = pos_weight * rew_pos + vel_weight * rew_vel
 
     # ------------------------------
     # (2) History 저장
     # ------------------------------
     step = int(env.common_step_counter)
-    target_now = future_targets[:, :D][0].detach().cpu().numpy()
+    target_now = next_target[0].detach().cpu().numpy()
     current_now = q[0].detach().cpu().numpy()
     _joint_tracking_history.append((step, target_now, current_now))
 
@@ -145,6 +150,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
                 save_joint_tracking_plot(env)
 
     return total_reward
+
 
 
 
