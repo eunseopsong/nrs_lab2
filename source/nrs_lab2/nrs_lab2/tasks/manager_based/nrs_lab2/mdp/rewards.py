@@ -185,10 +185,13 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     step = int(env.common_step_counter)
     if step % 100 == 0:
         err_norm = torch.norm(diff[0]).item()
+        int_err = env._integral_error[0].item() if hasattr(env, "_integral_error") else 0.0
+
         print(f"\n[Step {step}]")
         print(f"  Target joints : {next_target[0].detach().cpu().numpy()}")
         print(f"  Current joints: {q[0].detach().cpu().numpy()}")
         print(f"  Error (‖q - q*‖): {err_norm:.6f}")
+        print(f"  Integral error (Σ‖e‖): {int_err:.6f}")
         print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}")
         print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}")
         print(f"  Penalty: {1.0 - boundary_penalty[0].item():.6f}, Final Reward: {total_reward[0].item():.6f}")
