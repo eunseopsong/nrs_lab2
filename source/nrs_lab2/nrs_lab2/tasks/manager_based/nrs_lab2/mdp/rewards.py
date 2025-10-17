@@ -93,17 +93,25 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
     total_reward = torch.zeros(num_envs, device=env.device)
 
     # ------------------------------
-    # (1) Reward 계산 (그대로 유지)
+    # (1) Reward 계산 (joint별 가중치 추가)
     # ------------------------------
+    # joint별 weight 정의 (예시)
+    joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)  
+    # q2, q4는 강하게 / q6는 약하게
+
     for k in range(horizon):
         target_k = future_targets[:, k*D:(k+1)*D]
         diff = q - target_k
-        # 기존: rew_pos = -torch.norm(diff, dim=1)
-        # 변경: 오차를 exp kernel로 감쇠시킴
-        sq_norm = torch.sum(diff ** 2, dim=1)
-        rew_pos = torch.exp(-sq_norm)             # exp(-‖q - q*‖²)
+
+        # 각 joint 오차에 weight 적용
+        weighted_sq = joint_weights * (diff ** 2)
+        sq_norm = torch.sum(weighted_sq, dim=1)
+
+        # exponential kernel
+        rew_pos = torch.exp(-sq_norm)
         rew_tanh = torch.tanh(-torch.norm(diff, dim=1))
         total_reward += (gamma ** k) * (rew_pos + rew_tanh)
+
 
     # ------------------------------
     # (2) History 저장
