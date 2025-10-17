@@ -132,29 +132,30 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     rew_pos = torch.exp(-sq_norm / (sigma ** 2))
 
     # Velocity reward
-    diff_dot = qd
-    vel_norm = torch.norm(diff_dot, dim=1)
-    rew_vel = torch.exp(-vel_norm / (sigma ** 2))
+    # diff_dot = qd
+    # vel_norm = torch.norm(diff_dot, dim=1)
+    # rew_vel = torch.exp(-vel_norm / (sigma ** 2))
 
     # Base reward (7:3 비율)
-    base_reward = pos_weight * rew_pos + vel_weight * rew_vel
+    # base_reward = pos_weight * rew_pos + vel_weight * rew_vel
+    base_reward = rew_pos  # velocity 항 제거
 
     # ------------------------------
     # (2-1) Integral Error Term (steady-state error 제거)
     # ------------------------------
-    if not hasattr(env, "_integral_error"):
-        env._integral_error = torch.zeros_like(base_reward)
+    # if not hasattr(env, "_integral_error"):
+    #     env._integral_error = torch.zeros_like(base_reward)
 
     # 누적 오차 업데이트 (지수 감쇠)
-    beta = 0.98  # 0.95~0.99 권장 (감쇠율)
-    env._integral_error = beta * env._integral_error + torch.norm(diff, dim=1)
+    # beta = 0.98  # 0.95~0.99 권장 (감쇠율)
+    # env._integral_error = beta * env._integral_error + torch.norm(diff, dim=1)
 
     # integral penalty (steady-state error 방지)
-    k_i = 0.2  # integral 강도 (0.1~0.3 권장)
-    integral_penalty = k_i * env._integral_error
+    # k_i = 0.2  # integral 강도 (0.1~0.3 권장)
+    # integral_penalty = k_i * env._integral_error
 
     # 보상에서 감산
-    base_reward = base_reward - integral_penalty
+    # base_reward = base_reward - integral_penalty
 
 
     # ------------------------------
@@ -175,7 +176,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     overflow_norm = torch.sum(overflow * joint_weights, dim=1)
 
     # ✅ 완화된 penalty (k값 ↓)
-    k = 2.0
+    k = 6.0
     boundary_penalty = torch.exp(-k * overflow_norm)  # 0~1 사이 값
     total_reward = (base_reward + boost_reward) * boundary_penalty
 
@@ -185,14 +186,15 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     step = int(env.common_step_counter)
     if step % 100 == 0:
         err_norm = torch.norm(diff[0]).item()
-        int_err = env._integral_error[0].item() if hasattr(env, "_integral_error") else 0.0
+        # int_err = env._integral_error[0].item() if hasattr(env, "_integral_error") else 0.0
 
         print(f"\n[Step {step}]")
         print(f"  Target joints : {next_target[0].detach().cpu().numpy()}")
         print(f"  Current joints: {q[0].detach().cpu().numpy()}")
         print(f"  Error (‖q - q*‖): {err_norm:.6f}")
-        print(f"  Integral error (Σ‖e‖): {int_err:.6f}")
-        print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}")
+        # print(f"  Integral error (Σ‖e‖): {int_err:.6f}")
+        # print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}")
+        print(f"  Reward_pos: {rew_pos[0].item():.6f}")
         print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}")
         print(f"  Penalty: {1.0 - boundary_penalty[0].item():.6f}, Final Reward: {total_reward[0].item():.6f}")
 
