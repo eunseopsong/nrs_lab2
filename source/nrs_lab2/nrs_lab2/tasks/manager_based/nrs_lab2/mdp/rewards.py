@@ -189,7 +189,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     # (5) 디버깅 출력 (매 100 step)
     # ------------------------------
     step = int(env.common_step_counter)
-    if step % 100 == 0:
+    if step % 10 == 0:
         err_norm = torch.norm(diff[0]).item()
         # int_err = env._integral_error[0].item() if hasattr(env, "_integral_error") else 0.0
 
@@ -224,7 +224,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
 # --------------------------------
 # Reward improvement (meta reward)
 # --------------------------------
-def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 3.0):
+def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 9.0):
     """
     강화된 수렴 보상 (Reward Improvement Term)
     - 이전 step보다 reward_pos가 커지면 positive boost
