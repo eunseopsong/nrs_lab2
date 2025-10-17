@@ -82,10 +82,21 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 import matplotlib
 matplotlib.use("Agg")   # ✅ headless 환경에서도 저장되게 강제
 
+# -------------------
+# Joint tracking reward (exp kernel + velocity term)
+# -------------------
+
+import matplotlib
+matplotlib.use("Agg")
+
 def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 10):
     global _joint_tracking_history, _episode_counter
 
+    # ------------------------------
+    # (0) 현재 joint 상태
+    # ------------------------------
     q = env.scene["robot"].data.joint_pos[:, :6]
+    qd = env.scene["robot"].data.joint_vel[:, :6]
     future_targets = get_hdf5_target_future(env, horizon=horizon)
 
     num_envs, D = q.shape
@@ -93,25 +104,29 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
     total_reward = torch.zeros(num_envs, device=env.device)
 
     # ------------------------------
-    # (1) Reward 계산 (joint별 가중치 추가)
+    # (1) Reward 계산 (joint별 가중치 + velocity term)
     # ------------------------------
-    # joint별 weight 정의 (예시)
-    joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)  
-    # q2, q4는 강하게 / q6는 약하게
+    joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)  # q2, q4 ↑ / q6 ↓
+    vel_weight = 0.3   # rew_vel 비중
+    pos_weight = 0.7   # rew_pos 비중
 
     for k in range(horizon):
         target_k = future_targets[:, k*D:(k+1)*D]
         diff = q - target_k
 
-        # 각 joint 오차에 weight 적용
+        # position term
         weighted_sq = joint_weights * (diff ** 2)
         sq_norm = torch.sum(weighted_sq, dim=1)
+        rew_pos = torch.exp(-sq_norm)  # exp(-‖e‖²)
 
-        # exponential kernel
-        rew_pos = torch.exp(-sq_norm)
-        rew_tanh = torch.tanh(-torch.norm(diff, dim=1))
-        total_reward += (gamma ** k) * (rew_pos + rew_tanh)
+        # velocity term (목표 속도는 0으로 가정)
+        diff_dot = qd  # q̇* = 0
+        vel_norm = torch.norm(diff_dot, dim=1)
+        rew_vel = torch.exp(-vel_norm)  # exp(-‖ė‖)
 
+        # position:velocity = 7:3
+        rew_combined = pos_weight * rew_pos + vel_weight * rew_vel
+        total_reward += (gamma ** k) * rew_combined
 
     # ------------------------------
     # (2) History 저장
@@ -130,6 +145,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
                 save_joint_tracking_plot(env)
 
     return total_reward
+
 
 
 
