@@ -177,8 +177,13 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
 
     # ✅ 완화된 penalty (k값 ↓)
     k = 6.0
-    boundary_penalty = torch.exp(-k * overflow_norm)  # 0~1 사이 값
-    total_reward = (base_reward + boost_reward) * boundary_penalty
+    # ✅ boundary_penalty: 정상(0), 벗어날수록 1에 가까움
+    boundary_penalty = 1.0 - torch.exp(-k * overflow_norm)
+
+    # 감산형 penalty 적용 (reward 감소)
+    total_reward = (base_reward + boost_reward) * (1.0 - boundary_penalty)
+    total_reward = torch.clamp(total_reward, min=0.0)
+
 
     # ------------------------------
     # (5) 디버깅 출력 (매 100 step)
