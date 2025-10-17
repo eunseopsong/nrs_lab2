@@ -135,7 +135,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     if not hasattr(env, "_joint_range_min"):
         path = os.path.expanduser("~/nrs_lab2/datasets/joint_recording.h5")
         with h5py.File(path, "r") as f:
-            joint_data = f["joint_target"][:]  # (N, 6)
+            joint_data = f["joint_positions"][:]  # (N, 6)
             env._joint_range_min = torch.tensor(joint_data.min(axis=0), dtype=torch.float32, device=env.device)
             env._joint_range_max = torch.tensor(joint_data.max(axis=0), dtype=torch.float32, device=env.device)
         print("[INFO] ✅ Loaded joint range min/max from HDF5")
