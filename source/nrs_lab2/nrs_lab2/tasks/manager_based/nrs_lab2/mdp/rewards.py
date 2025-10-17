@@ -203,6 +203,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
         print(f"  Reward_pos: {rew_pos[0].item():.6f}")
         print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}")
         # print(f"  Penalty: {1.0 - boundary_penalty[0].item():.6f}, Final Reward: {total_reward[0].item():.6f}")
+        print(f"  Final Reward: {total_reward[0].item():.6f}")
 
     # ------------------------------
     # (6) History 저장
@@ -225,28 +226,38 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
 # --------------------------------
 # Reward improvement (meta reward)
 # --------------------------------
-def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 9.0):
+def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 2.0, sensitivity: float = 0.1):
     """
-    강화된 수렴 보상 (Reward Improvement Term)
+    강화된 수렴 보상 (Reward Improvement Term, exponential kernel, no EMA)
     - 이전 step보다 reward_pos가 커지면 positive boost
-    - 감소하면 penalty 적용
-    - alpha: 보상 강도 (0.5~3.0 권장)
-    - ✅ episode 초기화 시에도 _prev_total_reward 유지
+    - 감소하면 penalty (음수 포함)
+    - alpha: 보상 강도 (3.0~10.0 권장)
+    - sensitivity: exp 변화 감도 (0.05~0.2 권장)
+    - ✅ EMA 제거: step 간 즉각적 변화에 민감하게 반응
     """
     global _prev_total_reward
 
-    # IsaacLab의 env.reset() 시점에서도 유지되도록 None 체크 완화
+    # 초기화 (첫 step or NaN 방지)
     if _prev_total_reward is None or torch.isnan(current_reward).any():
         _prev_total_reward = current_reward.clone()
         return torch.zeros_like(current_reward)
 
-    # reward 변화량 계산
+    # ------------------------------
+    # (1) Reward 변화량 계산
+    # ------------------------------
     reward_delta = current_reward - _prev_total_reward
-    reward_boost = alpha * torch.clamp(torch.tanh(reward_delta), min=0.0)  # ✅ positive delta만 boost
 
-    # ✅ episode reset 시에도 유지되도록 단순 clone이 아닌 EMA 형태로 누적
-    beta = 0.98  # 0.95~0.99 권장
-    _prev_total_reward = beta * _prev_total_reward + (1 - beta) * current_reward
+    # ------------------------------
+    # (2) Exponential kernel 기반 boost (EMA 제거)
+    # ------------------------------
+    # Δ > 0 → exp(+) > 1 → positive boost
+    # Δ < 0 → exp(-) < 1 → negative penalty
+    reward_boost = alpha * (torch.exp(reward_delta / sensitivity) - 1.0)
+
+    # ------------------------------
+    # (3) 다음 step 기준 업데이트
+    # ------------------------------
+    _prev_total_reward = current_reward.clone()
 
     return reward_boost
 
