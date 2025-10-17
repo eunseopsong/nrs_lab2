@@ -82,7 +82,7 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 import matplotlib
 matplotlib.use("Agg")   # ✅ headless 환경에서도 저장되게 강제
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 30):
+def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 10):
     global _joint_tracking_history, _episode_counter
 
     q = env.scene["robot"].data.joint_pos[:, :6]
