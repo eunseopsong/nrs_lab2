@@ -96,7 +96,14 @@ matplotlib.use("Agg")
 import matplotlib
 matplotlib.use("Agg")
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: int = 10):
+# -------------------
+# Joint tracking reward (Gaussian kernel flattening + Debug print)
+# -------------------
+
+import matplotlib
+matplotlib.use("Agg")
+
+def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 0.5):
     global _joint_tracking_history, _episode_counter
 
     # ------------------------------
@@ -104,45 +111,55 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
     # ------------------------------
     q = env.scene["robot"].data.joint_pos[:, :6]
     qd = env.scene["robot"].data.joint_vel[:, :6]
-    future_targets = get_hdf5_target_future(env, horizon=horizon)
+    future_targets = get_hdf5_target_future(env, horizon=2)  # t, t+1만 필요
 
     num_envs, D = q.shape
     total_reward = torch.zeros(num_envs, device=env.device)
 
     # ------------------------------
-    # (1) Reward 계산 (joint별 가중치 + velocity term)
+    # (1) Reward 계산 (exp 커널 평탄화)
     # ------------------------------
     joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)
     vel_weight = 0.3
     pos_weight = 0.7
 
-    # ✅ diff = q(t) - q*(t+1)
     next_target = future_targets[:, D:2*D] if future_targets.shape[1] >= 2*D else future_targets[:, :D]
     diff = q - next_target
 
-    # position term
+    # 평탄화된 exponential kernel (σ 적용)
     weighted_sq = joint_weights * (diff ** 2)
     sq_norm = torch.sum(weighted_sq, dim=1)
-    rew_pos = torch.exp(-sq_norm)
+    rew_pos = torch.exp(-sq_norm / (sigma ** 2))  # ✅ exp(-‖e‖² / σ²)
 
-    # velocity term (목표 속도 = 0)
+    # velocity term
     diff_dot = qd
     vel_norm = torch.norm(diff_dot, dim=1)
-    rew_vel = torch.exp(-vel_norm)
+    rew_vel = torch.exp(-vel_norm / (sigma ** 2))
 
-    # position:velocity = 7:3
+    # 최종 reward (7:3 비율)
     total_reward = pos_weight * rew_pos + vel_weight * rew_vel
 
     # ------------------------------
-    # (2) History 저장
+    # (2) 디버깅 출력 (매 100 step마다)
     # ------------------------------
     step = int(env.common_step_counter)
+    if step % 100 == 0:  # ← 매 step 보고 싶다면 if True 로 변경
+        err_norm = torch.norm(diff[0]).item()
+        print(f"\n[Step {step}]")
+        print(f"  Target joints : {next_target[0].detach().cpu().numpy()}")
+        print(f"  Current joints: {q[0].detach().cpu().numpy()}")
+        print(f"  Error (‖q - q*‖): {err_norm:.6f}")
+        print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}, Total: {total_reward[0].item():.6f}")
+
+    # ------------------------------
+    # (3) History 저장
+    # ------------------------------
     target_now = next_target[0].detach().cpu().numpy()
     current_now = q[0].detach().cpu().numpy()
     _joint_tracking_history.append((step, target_now, current_now))
 
     # ------------------------------
-    # (3) Episode 종료 시 시각화
+    # (4) Episode 종료 시 시각화
     # ------------------------------
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         if step > 0 and step % int(env.max_episode_length) == 0:
@@ -150,6 +167,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
                 save_joint_tracking_plot(env)
 
     return total_reward
+
 
 
 
