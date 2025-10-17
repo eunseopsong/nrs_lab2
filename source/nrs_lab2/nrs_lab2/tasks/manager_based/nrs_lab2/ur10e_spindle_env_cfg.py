@@ -93,12 +93,12 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     # )
 
     # Contact sensor (replicated per env)
-    # contact_forces = ContactSensorCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link",
-    #     update_period=0.0,
-    #     history_length=10,
-    #     debug_vis=True,
-    # )
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link",
+        update_period=0.0,
+        history_length=10,
+        debug_vis=True,
+    )
 
     # -----------------------------------------------------------------------------
     # Camera Sensor Configuration
@@ -106,24 +106,24 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     # 오일러 각(-180, 0, -180)을 쿼터니언(ros convention)으로 직접 계산한 값:
     # qx, qy, qz, qw = (0, 0, 0, 1)와 동일한 방향이지만 180° 회전 상태이므로 약간 다름.
     # 실제 변환 결과: (x=0, y=0, z=1, w=0) (즉, 180도 yaw)
-    # camera = CameraCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link/camera_sensors",
-    #     update_period=0.1,
-    #     height=480,
-    #     width=640,
-    #     data_types=["rgb", "distance_to_image_plane", "normals"],
-    #     spawn=sim_utils.PinholeCameraCfg(
-    #         focal_length=18.14756,
-    #         focus_distance=40.0,
-    #         horizontal_aperture=20.955,
-    #         clipping_range=(0.1, 1.0e5),
-    #     ),
-    #     offset=CameraCfg.OffsetCfg(
-    #         pos=(0.0, -0.1, 0.0),
-    #         rot=(0.0, 0.0, 1.0, 0.0),  # ← ✅ 함수 대신 직접 쿼터니언 기입
-    #         convention="ros",
-    #     ),
-    # )
+    camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link/camera_sensors",
+        update_period=0.1,
+        height=480,
+        width=640,
+        data_types=["rgb", "distance_to_image_plane", "normals"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=18.14756,
+            focus_distance=40.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1.0e5),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.0, -0.1, 0.0),
+            rot=(0.0, 0.0, 1.0, 0.0),  # ← ✅ 함수 대신 직접 쿼터니언 기입
+            convention="ros",
+        ),
+    )
 
 # -----------------------------------------------------------------------------
 # Actions
@@ -159,21 +159,21 @@ class ObservationsCfg:
         )
 
         # ✅ Contact Sensor 데이터 추가 (평균 Fx, Fy, Fz + dummy Tx,Ty,Tz)
-        # contact_forces = ObsTerm(
-        #     func=local_obs.get_contact_forces,
-        #     params={"sensor_name": "contact_forces"},  # scene.contact_forces 이름과 동일해야 함
-        # )
+        contact_forces = ObsTerm(
+            func=local_obs.get_contact_forces,
+            params={"sensor_name": "contact_forces"},  # scene.contact_forces 이름과 동일해야 함
+        )
 
         # ✅ Camera distance 추가
-        # camera_distance = ObsTerm(
-        #     func=local_obs.get_camera_distance,
-        #     params={"sensor_name": "camera"},
-        # )
+        camera_distance = ObsTerm(
+            func=local_obs.get_camera_distance,
+            params={"sensor_name": "camera"},
+        )
 
-        # camera_normals = ObsTerm(
-        #     func=local_obs.get_camera_normals,
-        #     params={"sensor_name": "camera"},
-        # )
+        camera_normals = ObsTerm(
+            func=local_obs.get_camera_normals,
+            params={"sensor_name": "camera"},
+        )
 
 
         def __post_init__(self):
