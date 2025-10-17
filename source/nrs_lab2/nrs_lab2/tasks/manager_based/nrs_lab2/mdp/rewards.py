@@ -98,7 +98,10 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, gamma: float = 0.9, horizon: i
     for k in range(horizon):
         target_k = future_targets[:, k*D:(k+1)*D]
         diff = q - target_k
-        rew_pos = -torch.norm(diff, dim=1)
+        # 기존: rew_pos = -torch.norm(diff, dim=1)
+        # 변경: 오차를 exp kernel로 감쇠시킴
+        sq_norm = torch.sum(diff ** 2, dim=1)
+        rew_pos = torch.exp(-sq_norm)             # exp(-‖q - q*‖²)
         rew_tanh = torch.tanh(-torch.norm(diff, dim=1))
         total_reward += (gamma ** k) * (rew_pos + rew_tanh)
 
