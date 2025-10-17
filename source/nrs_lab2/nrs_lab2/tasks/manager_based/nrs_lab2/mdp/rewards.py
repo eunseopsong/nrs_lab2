@@ -97,14 +97,18 @@ import matplotlib
 matplotlib.use("Agg")
 
 # -------------------
-# Joint tracking reward (Gaussian kernel flattening + Debug print)
+# Joint tracking reward (Gaussian kernel flattening)
+# + Convergence boost term (meta reward)
 # -------------------
 
 import matplotlib
 matplotlib.use("Agg")
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0):
-    global _joint_tracking_history, _episode_counter
+_prev_total_reward = None  # 전역 변수로 이전 step reward 저장
+
+
+def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: float = 1.0):
+    global _joint_tracking_history, _episode_counter, _prev_total_reward
 
     # ------------------------------
     # (0) 현재 상태
@@ -117,7 +121,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0):
     total_reward = torch.zeros(num_envs, device=env.device)
 
     # ------------------------------
-    # (1) Reward 계산 (exp 커널 평탄화)
+    # (1) Base Reward 계산 (exp 커널 평탄화)
     # ------------------------------
     joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)
     vel_weight = 0.3
@@ -126,40 +130,47 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0):
     next_target = future_targets[:, D:2*D] if future_targets.shape[1] >= 2*D else future_targets[:, :D]
     diff = q - next_target
 
-    # 평탄화된 exponential kernel (σ 적용)
+    # position term
     weighted_sq = joint_weights * (diff ** 2)
     sq_norm = torch.sum(weighted_sq, dim=1)
-    rew_pos = torch.exp(-sq_norm / (sigma ** 2))  # ✅ exp(-‖e‖² / σ²)
+    rew_pos = torch.exp(-sq_norm / (sigma ** 2))
 
     # velocity term
     diff_dot = qd
     vel_norm = torch.norm(diff_dot, dim=1)
     rew_vel = torch.exp(-vel_norm / (sigma ** 2))
 
-    # 최종 reward (7:3 비율)
-    total_reward = pos_weight * rew_pos + vel_weight * rew_vel
+    # base reward (7:3 비율)
+    base_reward = pos_weight * rew_pos + vel_weight * rew_vel
 
     # ------------------------------
-    # (2) 디버깅 출력 (매 100 step마다)
+    # (2) Convergence Boost Reward 추가
+    # ------------------------------
+    boost_reward = reward_convergence_boost(env, base_reward, alpha)
+    total_reward = base_reward + 0.5 * boost_reward  # boost 가중치 0.5
+
+    # ------------------------------
+    # (3) 디버깅 출력 (매 100 step)
     # ------------------------------
     step = int(env.common_step_counter)
-    if step % 100 == 0:  # ← 매 step 보고 싶다면 if True 로 변경
+    if step % 100 == 0:
         err_norm = torch.norm(diff[0]).item()
         print(f"\n[Step {step}]")
         print(f"  Target joints : {next_target[0].detach().cpu().numpy()}")
         print(f"  Current joints: {q[0].detach().cpu().numpy()}")
         print(f"  Error (‖q - q*‖): {err_norm:.6f}")
-        print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}, Total: {total_reward[0].item():.6f}")
+        print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}")
+        print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}, Final: {total_reward[0].item():.6f}")
 
     # ------------------------------
-    # (3) History 저장
+    # (4) History 저장
     # ------------------------------
     target_now = next_target[0].detach().cpu().numpy()
     current_now = q[0].detach().cpu().numpy()
     _joint_tracking_history.append((step, target_now, current_now))
 
     # ------------------------------
-    # (4) Episode 종료 시 시각화
+    # (5) Episode 종료 시 시각화
     # ------------------------------
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         if step > 0 and step % int(env.max_episode_length) == 0:
@@ -169,6 +180,29 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0):
     return total_reward
 
 
+# --------------------------------
+# Reward improvement (meta reward)
+# --------------------------------
+def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 1.0):
+    """
+    강화된 수렴 보상 (Reward Improvement Term)
+    - 이전 step보다 reward_pos가 커지면 positive boost
+    - 감소하면 penalty 적용
+    - alpha: 보상 강도 (0.5~2.0 권장)
+    """
+    global _prev_total_reward
+
+    # 초기 step인 경우 0으로 시작
+    if _prev_total_reward is None:
+        _prev_total_reward = current_reward.clone()
+        return torch.zeros_like(current_reward)
+
+    # reward 변화량 계산
+    reward_delta = current_reward - _prev_total_reward
+    reward_boost = alpha * torch.tanh(reward_delta)
+
+    _prev_total_reward = current_reward.clone()
+    return reward_boost
 
 
 

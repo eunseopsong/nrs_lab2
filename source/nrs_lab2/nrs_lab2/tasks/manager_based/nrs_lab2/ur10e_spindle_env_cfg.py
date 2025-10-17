@@ -210,14 +210,16 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    # (1) Joint tracking reward (Gaussian kernel + vel term)
+    # (1) Joint tracking reward (Gaussian kernel + vel term + convergence boost)
     joint_tracking_reward = RewTerm(
         func=local_rewards.joint_tracking_reward,
         weight=1.0,
         params={
-            "sigma": 2.0,   # ✅ exp(-||e||² / σ²) 평탄화 계수
+            "sigma": 2.0,   # exp(-||e||² / σ²) 평탄화 계수
+            "alpha": 1.0,   # convergence boost 강도
         },
     )
+
 
     # (2) Contact stability reward
     # contact_force_reward = RewTerm(
