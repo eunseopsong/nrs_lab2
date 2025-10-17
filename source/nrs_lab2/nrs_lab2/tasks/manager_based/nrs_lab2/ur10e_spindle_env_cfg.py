@@ -219,7 +219,7 @@ class RewardsCfg:
     joint_tracking_reward = RewTerm(
         func=local_rewards.joint_tracking_reward,
         weight=1.0,
-        params={"gamma": 0.9, "horizon": 30},
+        params={"gamma": 0.9, "horizon": 10},
     )
 
     # (2) Contact stability reward
