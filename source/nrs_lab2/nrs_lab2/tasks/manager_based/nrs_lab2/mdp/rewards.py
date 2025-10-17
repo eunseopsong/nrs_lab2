@@ -183,7 +183,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
 # --------------------------------
 # Reward improvement (meta reward)
 # --------------------------------
-def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 1.0):
+def reward_convergence_boost(env, current_reward: torch.Tensor, alpha: float = 3.0):
     """
     강화된 수렴 보상 (Reward Improvement Term)
     - 이전 step보다 reward_pos가 커지면 positive boost
