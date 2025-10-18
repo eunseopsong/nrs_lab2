@@ -161,7 +161,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     # ------------------------------
     # (3) Convergence Boost Reward 추가
     # ------------------------------
-    boost_reward = reward_convergence_boost(env, base_reward, alpha)
+    # boost_reward = reward_convergence_boost(env, base_reward, alpha)
 
     # ------------------------------
     # (4) 완화된 Boundary Penalty
@@ -184,7 +184,8 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
     # total_reward = (base_reward + boost_reward) * (1.0 - boundary_penalty)
     # total_reward = torch.clamp(total_reward, min=0.0)
 
-    total_reward = base_reward + boost_reward
+    # total_reward = base_reward + boost_reward
+    total_reward = base_reward
 
     # ------------------------------
     # (5) 디버깅 출력 (매 100 step)
@@ -201,7 +202,7 @@ def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: flo
         # print(f"  Integral error (Σ‖e‖): {int_err:.6f}")
         # print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}")
         print(f"  Reward_pos: {rew_pos[0].item():.6f}")
-        print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}")
+        # print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}")
         # print(f"  Penalty: {1.0 - boundary_penalty[0].item():.6f}, Final Reward: {total_reward[0].item():.6f}")
         print(f"  Final Reward: {total_reward[0].item():.6f}")
 
