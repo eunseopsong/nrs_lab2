@@ -125,7 +125,8 @@ def joint_tracking_reward(
     # (2) position error reward only
     # ---------------------------------------------------------
     e_q = q - q_star_mix
-    r_pos = torch.exp(-k_pose * (e_q ** 2).sum(dim=1))
+    # r_pos = torch.exp(-k_pose * (e_q ** 2).sum(dim=1))   # v1: L2 제곱 오차 기반
+    r_pos = torch.exp(-k_pose * torch.norm(e_q, dim=1))    # v2: L2 오차 기반
     total = r_pos
 
     # ---------------------------------------------------------
