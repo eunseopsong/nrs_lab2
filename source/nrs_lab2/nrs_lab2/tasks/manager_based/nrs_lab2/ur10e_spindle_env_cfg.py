@@ -206,6 +206,7 @@ class EventCfg:
 
 # -----------------------------------------------------------------------------
 # Rewards (DeepMimic + Progress + Multi-step Lookahead)
+# Version: C2  (previous version = C1)
 # -----------------------------------------------------------------------------
 
 @configclass
@@ -215,29 +216,30 @@ class RewardsCfg:
         weight=1.0,
         params={
             # ----- weights -----
-            "w_pose": 0.6,         # 자세 중심
-            "w_vel": 0.3,          # 속도 보조
-            "w_prog": 0.02,        # progress term (ReLU 기반, 과도한 진동 억제용)
+            "w_pose": 0.6,          # 자세 중심 (C1=0.6 → C2=0.6 동일)
+            "w_vel": 0.3,           # 속도 보조 (C1=0.3 → C2=0.3 동일)
+            "w_prog": 0.02,         # progress term 완화 (C1=0.3 → C2=0.02)
 
             # ----- exponential kernel scales -----
-            "k_pose": 3.0,         # position kernel gain (부드럽게)
-            "k_vel": 12.0,         # velocity kernel gain (속도 감쇠 강화)
+            "k_pose": 3.0,          # position kernel 부드럽게 (C1=4.0 → C2=3.0)
+            "k_vel": 16.0,          # velocity kernel 강화 (C1=1.5 → C2=16.0)
 
             # ----- regularizers -----
-            "lam_u": 1e-2,         # action magnitude penalty ↑
-            "lam_du": 5e-2,        # action rate penalty ↑ (진동 억제 핵심)
+            "lam_u": 1e-2,          # action magnitude penalty ↑ (C1=5e-3 → C2=1e-2)
+            "lam_du": 8e-2,         # action rate penalty ↑↑ (C1=1e-3 → C2=8e-2)
 
             # ----- boundary penalty (soft clamp) -----
-            "use_boundary": True,  # joint limit 반영
-            "k_boundary": 1.0,
-            "margin": 0.05,
-            "gamma_boundary": 0.05,
-            "bounds_mode": "percentile",  # joint limit 미정의 시 HDF5 백업 경계 사용
+            "use_boundary": True,   # joint limit 반영 (C1=True → C2=True)
+            "k_boundary": 1.0,      # (C1=1.0 → C2=1.0 동일)
+            "margin": 0.05,         # (C1=0.05 → C2=0.05 동일)
+            "gamma_boundary": 0.05, # (C1=0.05 → C2=0.05 동일)
+            "bounds_mode": "percentile",  # (C1=percentile → C2=percentile 동일)
 
             # ----- multi-step lookahead -----
-            "horizon": 50,         # target joint를 50스텝 미리 관찰 (유지)
+            "horizon": 50,          # target joint를 50스텝 미리 관찰 (C1=50 → C2=50 동일)
         },
     )
+
 
 
 
