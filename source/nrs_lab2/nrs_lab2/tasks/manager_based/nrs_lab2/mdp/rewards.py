@@ -75,153 +75,182 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
     return reward
 
 
-# -------------------
-# Joint tracking reward (Gaussian kernel flattening)
-# + Convergence boost term (meta reward)
-# + Smoothed boundary penalty
-# -------------------
+# ---------------------------------------------
+# Joint tracking reward (민감도 향상판)
+# - 범위 정규화 + Huber/가우시안 커널(선택/혼합)
+# - 속도 추종, 액션/Δ액션 패널티(per-dim mean), 프리뷰 보조항
+# - 10 step마다 디버그: current/target/error 및 각 보상 항목
+# - 에피소드 경계에서 save_joint_tracking_plot(env) 호출(외부 정의)
+# ---------------------------------------------
 
-import matplotlib
-matplotlib.use("Agg")
+import torch
 
-_prev_total_reward = None  # 전역 변수로 이전 step reward 저장
-_joint_bounds = None       # 각 joint의 [min, max] 저장용
+# 전역 캐시(이미 있으면 재사용)
+try:
+    _joint_bounds
+except NameError:
+    _joint_bounds = None
 
+try:
+    _joint_tracking_history
+except NameError:
+    _joint_tracking_history = []
 
-def joint_tracking_reward(env: ManagerBasedRLEnv, sigma: float = 2.0, alpha: float = 3.0):
-    global _joint_tracking_history, _episode_counter, _prev_total_reward, _joint_bounds
+def _huber(x: torch.Tensor, delta: float):
+    ax = torch.abs(x)
+    quad = 0.5 * (x ** 2)
+    lin  = delta * (ax - 0.5 * delta)
+    return torch.where(ax <= delta, quad, lin)
 
-    # ------------------------------
-    # (0) 현재 상태
-    # ------------------------------
-    q = env.scene["robot"].data.joint_pos[:, :6]
-    qd = env.scene["robot"].data.joint_vel[:, :6]
-    future_targets = get_hdf5_target_future(env, horizon=2)  # t, t+1만 필요
+def joint_tracking_reward(
+    env: "ManagerBasedRLEnv",
+    # ----- 기본 튜닝값 -----
+    delta: float = 0.06,          # 위치 Huber δ  (작을수록 민감)
+    delta_v: float = 0.15,        # 속도 Huber δ
+    w_pos: float = 0.6,           # 위치/속도 가중(합=1 권장)
+    w_vel: float = 0.4,
+    lam_u: float = 3e-3,          # 액션 L2 패널티(평균)
+    lam_du: float = 7e-3,         # Δ액션 L2 패널티(평균)
+    beta_prog: float = 0.03,      # 프리뷰(코사인) 보조항
+    # ----- 민감도/스케일 옵션 -----
+    pos_kernel: str = "mix",      # "huber" | "gauss" | "mix"
+    pos_gain: float = 3.0,        # Huber penalty gain (1 - gain*pen)
+    sigma_pos: float = 0.15,      # 가우시안 σ (정규화 e 기준)
+    bounds_mode: str = "percentile"  # "minmax" | "percentile"
+):
+    """
+    Returns:
+        r_total: [num_envs] tensor
+    Notes:
+        - _joint_tracking_history 에 (step, target[6], current[6]) 저장
+        - 에피소드 길이마다 save_joint_tracking_plot(env) 호출 (외부 함수)
+    """
+    global _joint_bounds, _joint_tracking_history
 
-    num_envs, D = q.shape
-    total_reward = torch.zeros(num_envs, device=env.device)
+    robot = env.scene["robot"]
+    q  = robot.data.joint_pos[:, :6]   # [E,6]
+    qd = robot.data.joint_vel[:, :6]
+    E, D = q.shape
 
-    # ------------------------------
-    # (1) Target 전체 범위로부터 boundary 설정 (episode 초기화 시 1회)
-    # ------------------------------
+    # ----- 타겟 (t, t+1 프리뷰) -----
+    fut = get_hdf5_target_future(env, horizon=2)   # [E, 12]
+    q_star     = fut[:, :D]
+    q_star_nxt = fut[:, D:2*D] if fut.shape[1] >= 2*D else q_star
+
+    # ----- 관절 가중치 -----
+    wj = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device).reshape(1, D)
+
+    # ----- joint bounds (퍼센타일 권장) -----
+    rng_eps = 1e-3
     if _joint_bounds is None:
-        path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
-        import h5py
-        with h5py.File(path, "r") as f:
-            joint_data = f["joint_positions"][:]  # ✅ key 이름 수정
-        joint_min = torch.tensor(joint_data.min(axis=0), device=env.device, dtype=torch.float32)
-        joint_max = torch.tensor(joint_data.max(axis=0), device=env.device, dtype=torch.float32)
+        try:
+            from builtins import _hdf5_trajectory
+            import numpy as np
+            if bounds_mode == "percentile":
+                p2  = np.percentile(_hdf5_trajectory,  2, axis=0)
+                p98 = np.percentile(_hdf5_trajectory, 98, axis=0)
+                joint_min = torch.tensor(p2[:D],  device=env.device, dtype=torch.float32)
+                joint_max = torch.tensor(p98[:D], device=env.device, dtype=torch.float32)
+            else:  # "minmax"
+                joint_min = torch.tensor(np.min(_hdf5_trajectory, axis=0)[:D],  device=env.device, dtype=torch.float32)
+                joint_max = torch.tensor(np.max(_hdf5_trajectory, axis=0)[:D],  device=env.device, dtype=torch.float32)
+        except Exception:
+            q0 = q.detach()
+            joint_min = (q0.min(dim=0).values - 1.0).to(env.device)
+            joint_max = (q0.max(dim=0).values + 1.0).to(env.device)
         _joint_bounds = (joint_min, joint_max)
-        print(f"[INFO] Joint boundaries set: min={joint_min.cpu().numpy()}, max={joint_max.cpu().numpy()}")
 
     joint_min, joint_max = _joint_bounds
+    rng = (joint_max - joint_min).clamp_min(rng_eps)  # [6]
 
-    # ------------------------------
-    # (2) Base Reward 계산 (exp 커널 평탄화 + Integral Error Term)
-    # ------------------------------
-    joint_weights = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device)
-    vel_weight = 0.3
-    pos_weight = 0.7
+    # ----- 정규화 오차 -----
+    e  = (q - q_star) / rng   # 위치 오차(정규화)
+    dt  = getattr(env.sim, "dt", 1.0 / 60.0)
+    dec = getattr(env, "decimation", 2)
+    dt_eff = dt * dec
+    qd_star = (q_star_nxt - q_star) / max(dt_eff, 1e-6)
+    ev = (qd - qd_star) / 2.0  # 속도 스케일 완화
 
-    next_target = future_targets[:, D:2*D] if future_targets.shape[1] >= 2*D else future_targets[:, :D]
-    diff = q - next_target
+    # ----- 위치 보상: Huber / Gaussian / Mix -----
+    pen_huber = (_huber(e, delta) * wj).mean(dim=1)          # [E]
+    e_norm2   = ((e * wj).pow(2).sum(dim=1)).clamp_min(1e-12)
+    rew_gauss = torch.exp(- e_norm2 / (sigma_pos ** 2))      # [E]
 
-    # Position reward
-    weighted_sq = joint_weights * (diff ** 2)
-    sq_norm = torch.sum(weighted_sq, dim=1)
-    rew_pos = torch.exp(-sq_norm / (sigma ** 2))
+    if pos_kernel == "huber":
+        r_pos = 1.0 - pos_gain * pen_huber
+    elif pos_kernel == "gauss":
+        r_pos = rew_gauss
+    else:  # "mix"
+        r_pos = 0.5 * (1.0 - pos_gain * pen_huber) + 0.5 * rew_gauss
 
-    # Velocity reward
-    # diff_dot = qd
-    # vel_norm = torch.norm(diff_dot, dim=1)
-    # rew_vel = torch.exp(-vel_norm / (sigma ** 2))
+    r_pos = torch.clamp(r_pos, min=-1.0, max=1.2)
 
-    # Base reward (7:3 비율)
-    # base_reward = pos_weight * rew_pos + vel_weight * rew_vel
-    base_reward = rew_pos  # velocity 항 제거
+    # ----- 속도 보상: Huber -----
+    r_vel = 1.0 - _huber(ev, delta_v).mean(dim=1)  # [E]
 
-    # ------------------------------
-    # (2-1) Integral Error Term (steady-state error 제거)
-    # ------------------------------
-    # if not hasattr(env, "_integral_error"):
-    #     env._integral_error = torch.zeros_like(base_reward)
+    # ----- 액션/Δ액션 패널티 (per-dim mean) -----
+    if hasattr(env, "action_manager") and hasattr(env.action_manager, "action"):
+        a = env.action_manager.action
+    elif hasattr(env, "actions"):
+        a = env.actions
+    else:
+        a = torch.zeros((E, D), device=env.device)
 
-    # 누적 오차 업데이트 (지수 감쇠)
-    # beta = 0.98  # 0.95~0.99 권장 (감쇠율)
-    # env._integral_error = beta * env._integral_error + torch.norm(diff, dim=1)
+    if not hasattr(env, "_prev_action"):
+        env._prev_action = torch.zeros_like(a)
 
-    # integral penalty (steady-state error 방지)
-    # k_i = 0.2  # integral 강도 (0.1~0.3 권장)
-    # integral_penalty = k_i * env._integral_error
+    r_u  = -(a.square().mean(dim=1)) * lam_u
+    r_du = -((a - env._prev_action).square().mean(dim=1)) * lam_du
+    env._prev_action = a.clone()
 
-    # 보상에서 감산
-    # base_reward = base_reward - integral_penalty
+    # ----- 프리뷰 보조항: 방향 코사인 -----
+    prog = torch.zeros(E, device=env.device)
+    if fut.shape[1] >= 2 * D:
+        dir_tar = (q_star_nxt - q).detach()
+        if not hasattr(env, "_q_prev"):
+            env._q_prev = q.clone()
+        dir_act = (q - env._q_prev).detach()
+        env._q_prev = q.clone()
 
+        num = torch.sum(dir_tar * dir_act, dim=1)
+        den = dir_tar.norm(dim=1) * dir_act.norm(dim=1) + 1e-6
+        cos = num / den
+        prog = beta_prog * (cos + 1.0) * 0.5  # [0, beta_prog]
 
-    # ------------------------------
-    # (3) Convergence Boost Reward 추가
-    # ------------------------------
-    # boost_reward = reward_convergence_boost(env, base_reward, alpha)
+    # ----- 총합 보상 -----
+    r_total = (w_pos * r_pos + w_vel * r_vel) + r_u + r_du + prog
+    r_total = torch.clamp(r_total, min=-5.0, max=+5.0)
 
-    # ------------------------------
-    # (4) 완화된 Boundary Penalty
-    # ------------------------------
-    # margin을 두어 약간의 초과는 허용
-    # margin = 0.2
-    # overflow_low = torch.clamp(joint_min - q, min=0.0)
-    # overflow_high = torch.clamp(q - joint_max, min=0.0)
-    # overflow = overflow_low + overflow_high
-
-    # # overflow 합산 (joint별로 weighted 평균)
-    # overflow_norm = torch.sum(overflow * joint_weights, dim=1)
-
-    # # ✅ 완화된 penalty (k값 ↓)
-    # k = 6.0
-    # # ✅ boundary_penalty: 정상(0), 벗어날수록 1에 가까움
-    # boundary_penalty = 1.0 - torch.exp(-k * overflow_norm)
-
-    # # 감산형 penalty 적용 (reward 감소)
-    # total_reward = (base_reward + boost_reward) * (1.0 - boundary_penalty)
-    # total_reward = torch.clamp(total_reward, min=0.0)
-
-    # total_reward = base_reward + boost_reward
-    total_reward = base_reward
-
-    # ------------------------------
-    # (5) 디버깅 출력 (매 100 step)
-    # ------------------------------
-    step = int(env.common_step_counter)
-    if step % 10 == 0:
-        err_norm = torch.norm(diff[0]).item()
-        # int_err = env._integral_error[0].item() if hasattr(env, "_integral_error") else 0.0
-
-        print(f"\n[Step {step}]")
-        print(f"  Target joints : {next_target[0].detach().cpu().numpy()}")
-        print(f"  Current joints: {q[0].detach().cpu().numpy()}")
-        print(f"  Error (‖q - q*‖): {err_norm:.6f}")
-        # print(f"  Integral error (Σ‖e‖): {int_err:.6f}")
-        # print(f"  Reward_pos: {rew_pos[0].item():.6f}, Reward_vel: {rew_vel[0].item():.6f}")
-        print(f"  Reward_pos: {rew_pos[0].item():.6f}")
-        # print(f"  Base_total: {base_reward[0].item():.6f}, Boost: {boost_reward[0].item():.6f}")
-        # print(f"  Penalty: {1.0 - boundary_penalty[0].item():.6f}, Final Reward: {total_reward[0].item():.6f}")
-        print(f"  Final Reward: {total_reward[0].item():.6f}")
-
-    # ------------------------------
-    # (6) History 저장
-    # ------------------------------
-    target_now = next_target[0].detach().cpu().numpy()
-    current_now = q[0].detach().cpu().numpy()
-    _joint_tracking_history.append((step, target_now, current_now))
-
-    # ------------------------------
-    # (7) Episode 종료 시 시각화
-    # ------------------------------
+    # ----- 히스토리/플롯 -----
+    step = int(getattr(env, "common_step_counter", 0))
+    _joint_tracking_history.append(
+        (step, q_star[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
+    )
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         if step > 0 and step % int(env.max_episode_length) == 0:
             if _joint_tracking_history:
+                # 외부에 동일 이름 함수가 정의되어 있어야 함
                 save_joint_tracking_plot(env)
 
-    return total_reward
+    # ----- 디버그(10 step마다, env 0) -----
+    if step % 10 == 0:
+        e_vec = (q[0] - q_star[0])
+        print(f"\n[Step {step}]")
+        print(f"  Target joints[0]: {q_star[0].detach().cpu().numpy()}")
+        print(f"  Current joints[0]: {q[0].detach().cpu().numpy()}")
+        print(f"  Error (q - q* )[0]: {e_vec.detach().cpu().numpy()}")
+        print(f"  ‖Error‖_2[0]: {torch.norm(e_vec).item():.6f}")
+        print(f"  pos_kernel={pos_kernel}, bounds={bounds_mode}, pos_gain={pos_gain}, sigma_pos={sigma_pos}")
+        print(f"  mean|e|_norm={e[0].abs().mean().item():.4f}, L2^2(e_norm)={e_norm2[0].item():.4f}")
+        print("  Reward terms (env 0):")
+        print(f"    r_pos={r_pos[0].item():.6f}, r_vel={r_vel[0].item():.6f}, "
+              f"r_u={r_u[0].item():.6f}, r_du={r_du[0].item():.6f}, prog={prog[0].item():.6f}")
+        print(f"    TOTAL={r_total[0].item():.6f}")
+
+    return r_total
+
+
+
 
 
 # --------------------------------
@@ -347,11 +376,11 @@ def camera_distance_reward(env, target_distance: float = 0.185, sigma: float = 0
 
 
 # -------------------
-# Visualization
+# Visualization (numpy-only, same API)
 # -------------------
-_episode_counter = 0   # ✅ 전역 카운터
+_episode_counter = 0   # 전역 카운터 유지
 
-def save_joint_tracking_plot(env: ManagerBasedRLEnv):
+def save_joint_tracking_plot(env: "ManagerBasedRLEnv"):
     """joint target vs current trajectory 시각화 (q1~q6, 같은 번호는 같은 색)"""
     global _joint_tracking_history, _episode_counter
 
@@ -359,17 +388,17 @@ def save_joint_tracking_plot(env: ManagerBasedRLEnv):
         return
 
     steps, targets, currents = zip(*_joint_tracking_history)
-    targets = torch.from_numpy(np.array(targets))   # ✅ 속도 개선
-    currents = torch.from_numpy(np.array(currents))
+    steps = np.asarray(steps)
+    targets = np.asarray(targets)   # [T,6], np.float
+    currents = np.asarray(currents) # [T,6]
 
     plt.figure(figsize=(10, 6))
     colors = plt.cm.tab10.colors  # tab10 팔레트 (10개 색상)
 
     for j in range(targets.shape[1]):
         color = colors[j % len(colors)]
-        # q1~q6로 라벨링
         plt.plot(steps, targets[:, j], "--", label=f"Target q{j+1}", color=color, linewidth=1.2)
-        plt.plot(steps, currents[:, j], "-", label=f"Current q{j+1}", color=color, linewidth=2.0)
+        plt.plot(steps, currents[:, j], "-",  label=f"Current q{j+1}", color=color, linewidth=2.0)
 
     plt.xlabel("Step")
     plt.ylabel("Joint Value (rad)")
@@ -377,20 +406,15 @@ def save_joint_tracking_plot(env: ManagerBasedRLEnv):
     plt.legend(ncol=2, fontsize=8)
     plt.grid(True)
 
-    # 저장 경로
     save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
     os.makedirs(save_dir, exist_ok=True)
-
-    # ✅ episode_index 대신 전역 카운터 사용
     save_path = os.path.join(save_dir, f"joint_tracking_episode{_episode_counter}.png")
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=150)
     plt.close()
     print(f"[INFO] Saved joint tracking plot to {save_path}")
 
-    _episode_counter += 1        # 다음 episode 번호 증가
-    _joint_tracking_history = [] # 다음 episode를 위해 초기화
-
-
+    _episode_counter += 1
+    _joint_tracking_history = []  # 다음 episode 준비
 
 
 
