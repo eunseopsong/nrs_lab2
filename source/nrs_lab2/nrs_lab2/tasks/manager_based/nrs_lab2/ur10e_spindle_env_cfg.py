@@ -216,7 +216,7 @@ class RewardsCfg:
         weight=1.0,
         params={
             # ----- position reward only -----
-            "k_pose": 8.0,          # position kernel gain
+            # "k_pose": 2.0,          # position kernel gain
             "horizon": 50,          # lookahead step (50-step 관찰)
             "decay": 0.955,         # exponential decay (50 step → 0.1배)
         },
