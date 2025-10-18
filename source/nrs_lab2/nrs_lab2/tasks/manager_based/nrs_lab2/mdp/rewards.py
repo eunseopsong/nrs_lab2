@@ -129,7 +129,7 @@ def joint_tracking_reward(
     # joint별 감쇠 계수 (UR10 예시: 어깨는 완만, 손목은 정밀)
     # 필요 시 HDF5 기반으로 자동 계산도 가능함
     k_pose_vec = torch.tensor(
-        [0.5, 2.0, 2.0, 1.0, 2.0, 0.5], device=q.device, dtype=torch.float32
+        [0.75, 4.0, 4.0, 1.5, 4.0, 0.75], device=q.device, dtype=torch.float32
     ).view(1, -1)   # [1,6] → broadcast 가능
 
     # joint별 L2 오차 계산 후 가중합
