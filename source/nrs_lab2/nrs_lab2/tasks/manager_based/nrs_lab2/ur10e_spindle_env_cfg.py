@@ -205,40 +205,23 @@ class EventCfg:
     )
 
 # -----------------------------------------------------------------------------
-# Rewards (DeepMimic + Progress + Multi-step Lookahead)
-# Version: C2  (previous version = C1)
+# Rewards (Position-only, Exponential Lookahead)
+# Version: v1
 # -----------------------------------------------------------------------------
 
 @configclass
 class RewardsCfg:
     joint_tracking_reward = RewTerm(
-        func=local_rewards.joint_tracking_reward,  # 동일 함수명 (내부 구현 교체됨)
+        func=local_rewards.joint_tracking_reward,  # 동일 함수명 (v1 내부 구현)
         weight=1.0,
         params={
-            # ----- weights -----
-            "w_pose": 0.6,          # 자세 중심 (C1=0.6 → C2=0.6 동일)
-            "w_vel": 0.3,           # 속도 보조 (C1=0.3 → C2=0.3 동일)
-            "w_prog": 0.02,         # progress term 완화 (C1=0.3 → C2=0.02)
-
-            # ----- exponential kernel scales -----
-            "k_pose": 3.0,          # position kernel 부드럽게 (C1=4.0 → C2=3.0)
-            "k_vel": 16.0,          # velocity kernel 강화 (C1=1.5 → C2=16.0)
-
-            # ----- regularizers -----
-            "lam_u": 1e-2,          # action magnitude penalty ↑ (C1=5e-3 → C2=1e-2)
-            "lam_du": 8e-2,         # action rate penalty ↑↑ (C1=1e-3 → C2=8e-2)
-
-            # ----- boundary penalty (soft clamp) -----
-            "use_boundary": True,   # joint limit 반영 (C1=True → C2=True)
-            "k_boundary": 1.0,      # (C1=1.0 → C2=1.0 동일)
-            "margin": 0.05,         # (C1=0.05 → C2=0.05 동일)
-            "gamma_boundary": 0.05, # (C1=0.05 → C2=0.05 동일)
-            "bounds_mode": "percentile",  # (C1=percentile → C2=percentile 동일)
-
-            # ----- multi-step lookahead -----
-            "horizon": 50,          # target joint를 50스텝 미리 관찰 (C1=50 → C2=50 동일)
+            # ----- position reward only -----
+            "k_pose": 8.0,          # position kernel gain
+            "horizon": 50,          # lookahead step (50-step 관찰)
+            "decay": 0.955,         # exponential decay (50 step → 0.1배)
         },
     )
+
 
 
 

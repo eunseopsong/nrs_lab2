@@ -76,7 +76,7 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 
 
 # -------------------
-# Joint tracking reward (DeepMimic + Progress term + Multi-step target observation)
+# Joint tracking reward (v1: position error only, exponential decay)
 # -------------------
 
 import torch
@@ -89,153 +89,73 @@ _episode_counter = 0
 
 def joint_tracking_reward(
     env: "ManagerBasedRLEnv",
-    # ===== 주요 가중치 =====
-    w_pose: float = 0.6,
-    w_vel: float = 0.3,
-    w_prog: float = 0.3,         # progress term 가중치
-    # ===== 커널 스케일 =====
-    k_pose: float = 4.0,
-    k_vel: float = 1.5,
-    # ===== 제어 규제 =====
-    lam_u: float = 5e-3,
-    lam_du: float = 1e-3,
-    # ===== 경계 페널티 =====
-    use_boundary: bool = True,
-    k_boundary: float = 1.0,
-    margin: float = 0.05,
-    gamma_boundary: float = 0.05,
-    bounds_mode: str = "percentile",
-    # ===== multi-step lookahead horizon =====
-    horizon: int = 50,
+    # ===== position error only =====
+    k_pose: float = 8.0,          # kernel gain
+    horizon: int = 50,            # multi-step lookahead
+    decay: float = 0.955,         # exponential decay (50 step -> 0.1×)
 ):
     """
-    DeepMimic + Progress Reward + Lookahead Horizon (q*_t ~ q*_{t+h})
-    ------------------------------------------------
-    r = w_pose * exp(-k_pose * ||q - q*_mix||^2)
-      + w_vel  * exp(-k_vel  * ||qd - qd*||^2)
-      + w_prog * ReLU(- e_q^T (qd - qd*))
-      + r_u + r_du - gamma_boundary * boundary
+    v1: Position-only reward
+    ------------------------
+    r = exp(-k_pose * ||q - q*_mix||^2)
+    where q*_mix = Σ_i (decay^i * q*_{t+i}) / Σ_i decay^i
     """
 
     robot = env.scene["robot"]
-    q  = robot.data.joint_pos[:, :6]
-    qd = robot.data.joint_vel[:, :6]
-    dt = getattr(env.sim, "dt", 1.0/120.0) * getattr(env, "decimation", 1)
+    q = robot.data.joint_pos[:, :6]
+    dt = getattr(env.sim, "dt", 1.0 / 120.0) * getattr(env, "decimation", 1)
 
     # ---------------------------------------------------------
-    # (1) Target horizon 확장 (여러 step 미리 관찰)
+    # (1) Target horizon 확장 (지수 감쇠 적용)
     # ---------------------------------------------------------
     fut = get_hdf5_target_future(env, horizon=horizon)  # [N, 6*horizon]
     D = q.shape[1]
-    # 현재~미래 평균 target (lookahead)
+
     q_stars = []
     for i in range(horizon):
-        q_stars.append(fut[:, i*D:(i+1)*D])
-    q_stars = torch.stack(q_stars, dim=0)        # [horizon, N, 6]
-    weights = torch.linspace(1.0, 0.955, steps=horizon, device=q.device)
+        q_stars.append(fut[:, i * D:(i + 1) * D])
+    q_stars = torch.stack(q_stars, dim=0)  # [horizon, N, 6]
+
+    # exponential decay weights (1.0, 0.955, 0.955^2, ...)
+    weights = torch.pow(decay, torch.arange(horizon, device=q.device).float())
     weights = weights / weights.sum()
     q_star_mix = (weights.view(horizon, 1, 1) * q_stars).sum(dim=0)  # weighted mean
 
-    # qd_star는 첫 2 step으로 근사
-    q_star_now = q_stars[0]
-    q_star_next = q_stars[1] if horizon > 1 else q_stars[0]
-    qd_star = (q_star_next - q_star_now) / (dt + 1e-8)
+    # ---------------------------------------------------------
+    # (2) position error reward only
+    # ---------------------------------------------------------
+    e_q = q - q_star_mix
+    r_pos = torch.exp(-k_pose * (e_q ** 2).sum(dim=1))
+    total = r_pos
 
     # ---------------------------------------------------------
-    # (2) 기본 error 항목
-    # ---------------------------------------------------------
-    e_q  = q - q_star_mix
-    e_qd = qd - qd_star
-
-    # Pose / Vel 커널
-    r_pose = torch.exp(-k_pose * (e_q**2).sum(dim=1))
-    r_vel  = torch.exp(-k_vel  * (e_qd**2).sum(dim=1))
-
-    # Progress term (ReLU: 에러 감소 방향이면 +보상)
-    prog_dot = torch.sum(e_q * (qd - qd_star), dim=1)
-    r_prog = torch.relu(-prog_dot)
-
-    # ---------------------------------------------------------
-    # (3) 제어 규제
-    # ---------------------------------------------------------
-    u = getattr(env, "_last_action", torch.zeros_like(q))
-    if not hasattr(env, "_prev_u_for_rew"):
-        env._prev_u_for_rew = torch.zeros_like(u)
-    du = u - env._prev_u_for_rew
-    env._prev_u_for_rew = u.detach()
-    r_u  = -lam_u  * (u.abs().mean(dim=1))
-    r_du = -lam_du * (du.abs().mean(dim=1))
-
-    # ---------------------------------------------------------
-    # (4) 경계 페널티 (additive)
-    # ---------------------------------------------------------
-    boundary_penalty = torch.zeros(q.shape[0], device=q.device)
-    if use_boundary:
-        global _joint_bounds
-        jl = getattr(robot.data, "joint_pos_limits", None)
-        if jl is not None and jl.shape[-1] >= 6:
-            joint_min = jl[0, :6] if jl.ndim == 2 else jl[:, 0]
-            joint_max = jl[1, :6] if jl.ndim == 2 else jl[:, 1]
-        else:
-            if _joint_bounds is None or bounds_mode == "percentile":
-                import h5py
-                path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
-                with h5py.File(path, "r") as f:
-                    jd = f["joint_positions"][:]
-                lo = np.percentile(jd[:, :6], 1, axis=0)
-                hi = np.percentile(jd[:, :6], 99, axis=0)
-                _joint_bounds = (
-                    torch.tensor(lo, device=q.device, dtype=torch.float32),
-                    torch.tensor(hi, device=q.device, dtype=torch.float32)
-                )
-            joint_min, joint_max = _joint_bounds
-
-        below = torch.clamp((joint_min + margin) - q, min=0.0)
-        above = torch.clamp(q - (joint_max - margin), min=0.0)
-        overflow_mean = (below + above).abs().mean(dim=1)
-        boundary_penalty = 1.0 - torch.exp(-k_boundary * overflow_mean)
-
-    # ---------------------------------------------------------
-    # (5) total reward
-    # ---------------------------------------------------------
-    total = w_pose * r_pose + w_vel * r_vel + w_prog * r_prog + r_u + r_du
-    if use_boundary:
-        total = total - gamma_boundary * boundary_penalty
-    total = torch.clamp(total, min=1e-6)
-
-    # ---------------------------------------------------------
-    # (6) Debug print (10 step마다)
+    # (3) Debug print (10 step마다)
     # ---------------------------------------------------------
     step = int(env.common_step_counter)
     if step % 10 == 0:
         with torch.no_grad():
-            print(f"[Step {step}] DeepMimic+Progress reward")
-            print(f"  mean |e_q|_2={torch.norm(e_q, dim=1).mean().item():.4f}, "
-                  f"mean |e_qd|_2={torch.norm(e_qd, dim=1).mean().item():.4f}")
-            print(f"  r_pose={r_pose[0].item():.6f}, r_vel={r_vel[0].item():.6f}, "
-                  f"r_prog={r_prog[0].item():.6f}, u={r_u[0].item():.6f}, du={r_du[0].item():.6f}, "
-                  f"boundary={boundary_penalty[0].item():.6f}")
-            print(f"  TOTAL(env0)={total[0].item():.6f}")
+            mean_err = torch.norm(e_q, dim=1).mean().item()
+            print(f"[Step {step}] v1: Position-only reward (exp decay)")
+            print(f"  mean |e_q|_2={mean_err:.4f}")
+            print(f"  r_pos={r_pos[0].item():.6f}")
             print(f"  Target mix[0]: {q_star_mix[0].detach().cpu().numpy()}")
             print(f"  Current joints[0]: {q[0].detach().cpu().numpy()}")
 
     # ---------------------------------------------------------
-    # (7) 히스토리 (env 0만 저장)
+    # (4) History & Visualization (env0 only)
     # ---------------------------------------------------------
     if "_joint_tracking_history" in globals():
         globals()["_joint_tracking_history"].append(
             (step, q_star_mix[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
         )
 
-    # ---------------------------------------------------------
-    # (8) episode 끝 시각화
-    # ---------------------------------------------------------
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         if step > 0 and step % int(env.max_episode_length) == 0:
             if "_joint_tracking_history" in globals() and globals()["_joint_tracking_history"]:
                 save_joint_tracking_plot(env)
 
     return total
+
 
 
 
