@@ -75,180 +75,194 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
     return reward
 
 
-# ---------------------------------------------
-# Joint tracking reward (민감도 향상판)
-# - 범위 정규화 + Huber/가우시안 커널(선택/혼합)
-# - 속도 추종, 액션/Δ액션 패널티(per-dim mean), 프리뷰 보조항
-# - 10 step마다 디버그: current/target/error 및 각 보상 항목
-# - 에피소드 경계에서 save_joint_tracking_plot(env) 호출(외부 정의)
-# ---------------------------------------------
+# -------------------
+# Joint tracking reward (DeepMimic-style: pose + velocity)
+# + action / action-delta regularizers
+# + (optional) soft boundary additive penalty
+# + episode-end plotting (structure 유지)
+# -------------------
 
 import torch
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 
-# 전역 캐시(이미 있으면 재사용)
-try:
-    _joint_bounds
-except NameError:
-    _joint_bounds = None
+_prev_total_reward = None
+_joint_bounds = None        # percentile bounds fallback
+_episode_counter = 0        # for plotting index
 
-try:
-    _joint_tracking_history
-except NameError:
-    _joint_tracking_history = []
-
-def _huber(x: torch.Tensor, delta: float):
-    ax = torch.abs(x)
-    quad = 0.5 * (x ** 2)
-    lin  = delta * (ax - 0.5 * delta)
-    return torch.where(ax <= delta, quad, lin)
 
 def joint_tracking_reward(
     env: "ManagerBasedRLEnv",
-    # ----- 기본 튜닝값 -----
-    delta: float = 0.06,          # 위치 Huber δ  (작을수록 민감)
-    delta_v: float = 0.15,        # 속도 Huber δ
-    w_pos: float = 0.6,           # 위치/속도 가중(합=1 권장)
-    w_vel: float = 0.4,
-    lam_u: float = 3e-3,          # 액션 L2 패널티(평균)
-    lam_du: float = 7e-3,         # Δ액션 L2 패널티(평균)
-    beta_prog: float = 0.03,      # 프리뷰(코사인) 보조항
-    # ----- 민감도/스케일 옵션 -----
-    pos_kernel: str = "mix",      # "huber" | "gauss" | "mix"
-    pos_gain: float = 3.0,        # Huber penalty gain (1 - gain*pen)
-    sigma_pos: float = 0.15,      # 가우시안 σ (정규화 e 기준)
-    bounds_mode: str = "percentile"  # "minmax" | "percentile"
+    # ----- weights -----
+    w_pose: float = 0.6,
+    w_vel: float = 0.3,
+    w_ee: float = 0.0,          # EE 항을 쓰고 싶으면 >0 로, 기본은 0
+    # ----- gaussian kernel scales -----
+    k_pose: float = 24.0,
+    k_vel: float = 8.0,
+    k_ee: float = 4.0,
+    # ----- regularizers -----
+    lam_u: float = 3e-3,
+    lam_du: float = 8e-3,
+    # ----- boundary penalty (additive, small) -----
+    use_boundary: bool = True,
+    k_boundary: float = 3.0,
+    margin: float = 0.10,
+    gamma_boundary: float = 0.2,   # 최종 보상에서 뺄 가중치(작게)
+    bounds_mode: str = "percentile",
 ):
     """
-    Returns:
-        r_total: [num_envs] tensor
-    Notes:
-        - _joint_tracking_history 에 (step, target[6], current[6]) 저장
-        - 에피소드 길이마다 save_joint_tracking_plot(env) 호출 (외부 함수)
+    DeepMimic 스타일의 모사 리워드:
+      r = w_pose * exp(-k_pose * ||q - q*||^2)
+        + w_vel  * exp(-k_vel  * ||qd - qd*||^2)
+        + w_ee   * exp(-k_ee   * ||ee - ee*||^2)
+        - lam_u * |u|_1
+        - lam_du * |Δu|_1
+        - gamma_boundary * boundary_penalty   (선택적, 가산)
+
+    시각화/히스토리/에피소드-끝 플로팅 등 기존 구조는 유지.
     """
-    global _joint_bounds, _joint_tracking_history
 
+    # ---------------------------------------------------------
+    # (0) 상태
+    # ---------------------------------------------------------
     robot = env.scene["robot"]
-    q  = robot.data.joint_pos[:, :6]   # [E,6]
-    qd = robot.data.joint_vel[:, :6]
-    E, D = q.shape
+    q   = robot.data.joint_pos[:, :6]   # [N,6]
+    qd  = robot.data.joint_vel[:, :6]   # [N,6]
 
-    # ----- 타겟 (t, t+1 프리뷰) -----
-    fut = get_hdf5_target_future(env, horizon=2)   # [E, 12]
-    q_star     = fut[:, :D]
-    q_star_nxt = fut[:, D:2*D] if fut.shape[1] >= 2*D else q_star
+    # 시뮬 타임스텝 (다음 타깃으로부터 qd* 계산에 사용)
+    dt = getattr(env.sim, "dt", 1.0/120.0) * getattr(env, "decimation", 1)
 
-    # ----- 관절 가중치 -----
-    wj = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0, 0.5], device=env.device).reshape(1, D)
+    # ---------------------------------------------------------
+    # (1) 타깃 (HDF5 → 현재/다음 타깃)
+    # ---------------------------------------------------------
+    fut = get_hdf5_target_future(env, horizon=2)  # [N, 12] (q*_t, q*_{t+1})
+    D = q.shape[1]
+    q_star    = fut[:, :D]          # 현재 타깃
+    q_star_n  = fut[:, D:2*D]       # 다음 타깃
+    qd_star   = (q_star_n - q_star) / (dt + 1e-8)
 
-    # ----- joint bounds (퍼센타일 권장) -----
-    rng_eps = 1e-3
-    if _joint_bounds is None:
-        try:
-            from builtins import _hdf5_trajectory
-            import numpy as np
-            if bounds_mode == "percentile":
-                p2  = np.percentile(_hdf5_trajectory,  2, axis=0)
-                p98 = np.percentile(_hdf5_trajectory, 98, axis=0)
-                joint_min = torch.tensor(p2[:D],  device=env.device, dtype=torch.float32)
-                joint_max = torch.tensor(p98[:D], device=env.device, dtype=torch.float32)
-            else:  # "minmax"
-                joint_min = torch.tensor(np.min(_hdf5_trajectory, axis=0)[:D],  device=env.device, dtype=torch.float32)
-                joint_max = torch.tensor(np.max(_hdf5_trajectory, axis=0)[:D],  device=env.device, dtype=torch.float32)
-        except Exception:
-            q0 = q.detach()
-            joint_min = (q0.min(dim=0).values - 1.0).to(env.device)
-            joint_max = (q0.max(dim=0).values + 1.0).to(env.device)
-        _joint_bounds = (joint_min, joint_max)
+    # 에러
+    e_q  = q  - q_star
+    e_qd = qd - qd_star
 
-    joint_min, joint_max = _joint_bounds
-    rng = (joint_max - joint_min).clamp_min(rng_eps)  # [6]
+    # ---------------------------------------------------------
+    # (2) DeepMimic-style kernels
+    # ---------------------------------------------------------
+    # 자세/속도 지수 커널 (합리적 스케일은 k_* 로 조절)
+    r_pose = torch.exp(-k_pose * (e_q**2).sum(dim=1))     # [N]
+    r_vel  = torch.exp(-k_vel  * (e_qd**2).sum(dim=1))    # [N]
 
-    # ----- 정규화 오차 -----
-    e  = (q - q_star) / rng   # 위치 오차(정규화)
-    dt  = getattr(env.sim, "dt", 1.0 / 60.0)
-    dec = getattr(env, "decimation", 2)
-    dt_eff = dt * dec
-    qd_star = (q_star_nxt - q_star) / max(dt_eff, 1e-6)
-    ev = (qd - qd_star) / 2.0  # 속도 스케일 완화
-
-    # ----- 위치 보상: Huber / Gaussian / Mix -----
-    pen_huber = (_huber(e, delta) * wj).mean(dim=1)          # [E]
-    e_norm2   = ((e * wj).pow(2).sum(dim=1)).clamp_min(1e-12)
-    rew_gauss = torch.exp(- e_norm2 / (sigma_pos ** 2))      # [E]
-
-    if pos_kernel == "huber":
-        r_pos = 1.0 - pos_gain * pen_huber
-    elif pos_kernel == "gauss":
-        r_pos = rew_gauss
-    else:  # "mix"
-        r_pos = 0.5 * (1.0 - pos_gain * pen_huber) + 0.5 * rew_gauss
-
-    r_pos = torch.clamp(r_pos, min=-1.0, max=1.2)
-
-    # ----- 속도 보상: Huber -----
-    r_vel = 1.0 - _huber(ev, delta_v).mean(dim=1)  # [E]
-
-    # ----- 액션/Δ액션 패널티 (per-dim mean) -----
-    if hasattr(env, "action_manager") and hasattr(env.action_manager, "action"):
-        a = env.action_manager.action
-    elif hasattr(env, "actions"):
-        a = env.actions
+    # (선택) EE 모사: 네가 EE 타깃을 제공할 때만 사용
+    r_ee = 0.0
+    if w_ee > 0.0 and hasattr(robot.data, "ee_pos_w") and callable(globals().get("get_demo_ee_target", None)):
+        ee      = robot.data.ee_pos_w[:, :3]          # [N,3]
+        ee_star = get_demo_ee_target(env)             # [N,3]
+        r_ee = torch.exp(-k_ee * ((ee - ee_star)**2).sum(dim=1))
     else:
-        a = torch.zeros((E, D), device=env.device)
+        r_ee = torch.zeros(q.shape[0], device=q.device)
 
-    if not hasattr(env, "_prev_action"):
-        env._prev_action = torch.zeros_like(a)
+    # ---------------------------------------------------------
+    # (3) 액션 규제 (크기/변화율)
+    # ---------------------------------------------------------
+    u = getattr(env, "_last_action", None)
+    if u is None:
+        u = torch.zeros_like(q)
+    if not hasattr(env, "_prev_u_for_rew"):
+        env._prev_u_for_rew = torch.zeros_like(u)
 
-    r_u  = -(a.square().mean(dim=1)) * lam_u
-    r_du = -((a - env._prev_action).square().mean(dim=1)) * lam_du
-    env._prev_action = a.clone()
+    du = u - env._prev_u_for_rew
+    env._prev_u_for_rew = u.detach()
 
-    # ----- 프리뷰 보조항: 방향 코사인 -----
-    prog = torch.zeros(E, device=env.device)
-    if fut.shape[1] >= 2 * D:
-        dir_tar = (q_star_nxt - q).detach()
-        if not hasattr(env, "_q_prev"):
-            env._q_prev = q.clone()
-        dir_act = (q - env._q_prev).detach()
-        env._q_prev = q.clone()
+    r_u  = -lam_u  * (u.abs().mean(dim=1))
+    r_du = -lam_du * (du.abs().mean(dim=1))
 
-        num = torch.sum(dir_tar * dir_act, dim=1)
-        den = dir_tar.norm(dim=1) * dir_act.norm(dim=1) + 1e-6
-        cos = num / den
-        prog = beta_prog * (cos + 1.0) * 0.5  # [0, beta_prog]
+    # ---------------------------------------------------------
+    # (4) (선택) 조인트 경계 페널티 : 가산형(부드럽게)
+    # ---------------------------------------------------------
+    boundary_penalty = torch.zeros(q.shape[0], device=q.device)
+    if use_boundary:
+        joint_min = joint_max = None
+        jl = getattr(robot.data, "joint_pos_limits", None)
+        if jl is not None and jl.shape[-1] >= 6:
+            # IsaacLab의 [2, dof] 또는 [dof,2] 형태 모두 대비
+            if jl.ndim == 2:
+                joint_min = jl[0, :6].to(q.device)
+                joint_max = jl[1, :6].to(q.device)
+            else:
+                joint_min = jl[:, 0][:6].to(q.device)
+                joint_max = jl[:, 1][:6].to(q.device)
+        else:
+            # 퍼센타일 기반 fallback (1~99%)
+            global _joint_bounds
+            if _joint_bounds is None or bounds_mode == "percentile":
+                import h5py
+                path = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
+                with h5py.File(path, "r") as f:
+                    joint_data = f["joint_positions"][:]   # [T,>=6]
+                lo = np.percentile(joint_data[:, :6], 1, axis=0)
+                hi = np.percentile(joint_data[:, :6], 99, axis=0)
+                _joint_bounds = (
+                    torch.tensor(lo, device=q.device, dtype=torch.float32),
+                    torch.tensor(hi, device=q.device, dtype=torch.float32),
+                )
+            joint_min, joint_max = _joint_bounds
 
-    # ----- 총합 보상 -----
-    r_total = (w_pos * r_pos + w_vel * r_vel) + r_u + r_du + prog
-    r_total = torch.clamp(r_total, min=-5.0, max=+5.0)
+        below = torch.clamp((joint_min + margin) - q, min=0.0)
+        above = torch.clamp(q - (joint_max - margin), min=0.0)
+        overflow = below + above                         # [N,6]
+        overflow_mean = overflow.abs().mean(dim=1)       # [N]
+        boundary_penalty = 1.0 - torch.exp(-k_boundary * overflow_mean)  # 0~1
 
-    # ----- 히스토리/플롯 -----
-    step = int(getattr(env, "common_step_counter", 0))
-    _joint_tracking_history.append(
-        (step, q_star[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
-    )
+    # ---------------------------------------------------------
+    # (5) 합성 (가산형)
+    # ---------------------------------------------------------
+    total = w_pose * r_pose + w_vel * r_vel + w_ee * r_ee + r_u + r_du
+    if use_boundary:
+        total = total - gamma_boundary * boundary_penalty
+
+    # 아주 작은 하한만 (신호 소실 방지) — 강한 클램프 금지
+    total = torch.clamp(total, min=1e-6)
+
+    # ---------------------------------------------------------
+    # (6) 디버깅 출력 (10 step마다)
+    # ---------------------------------------------------------
+    step = int(env.common_step_counter)
+    if step % 10 == 0:
+        with torch.no_grad():
+            print(f"[Step {step}] DeepMimic reward")
+            print(f"  k_pose={k_pose}, k_vel={k_vel}, w_pose={w_pose}, w_vel={w_vel}, w_ee={w_ee}")
+            print(f"  mean |e_q|_2={torch.norm(e_q, dim=1).mean().item():.4f}, "
+                  f"mean |e_qd|_2={torch.norm(e_qd, dim=1).mean().item():.4f}")
+            print(f"  terms(env0): pose={r_pose[0].item():.6f}, vel={r_vel[0].item():.6f}, "
+                  f"ee={(r_ee[0].item() if isinstance(r_ee, torch.Tensor) else 0.0):.6f}, "
+                  f"u={r_u[0].item():.6f}, du={r_du[0].item():.6f}, "
+                  f"boundary={(boundary_penalty[0].item() if use_boundary else 0.0):.6f}")
+            print(f"  TOTAL(env0)={total[0].item():.6f}")
+            # 타깃/현재 출력
+            print(f"  Target joints[0]:  {q_star[0].detach().cpu().numpy()}")
+            print(f"  Current joints[0]: {q[0].detach().cpu().numpy()}")
+            print(f"  Next target[0]:    {q_star_n[0].detach().cpu().numpy()}")
+
+    # ---------------------------------------------------------
+    # (7) 히스토리 (env 0만 기록 → 시각화 재사용)
+    # ---------------------------------------------------------
+    if "_joint_tracking_history" in globals():
+        globals()["_joint_tracking_history"].append(
+            (step, q_star[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
+        )
+
+    # ---------------------------------------------------------
+    # (8) 에피소드 끝에서 시각화 호출 (기존 함수 사용)
+    # ---------------------------------------------------------
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         if step > 0 and step % int(env.max_episode_length) == 0:
-            if _joint_tracking_history:
-                # 외부에 동일 이름 함수가 정의되어 있어야 함
+            if "_joint_tracking_history" in globals() and globals()["_joint_tracking_history"]:
+                # 사용자가 이미 갖고 있는 save_joint_tracking_plot(env)를 그대로 호출
                 save_joint_tracking_plot(env)
 
-    # ----- 디버그(10 step마다, env 0) -----
-    if step % 10 == 0:
-        e_vec = (q[0] - q_star[0])
-        print(f"\n[Step {step}]")
-        print(f"  Target joints[0]: {q_star[0].detach().cpu().numpy()}")
-        print(f"  Current joints[0]: {q[0].detach().cpu().numpy()}")
-        print(f"  Error (q - q* )[0]: {e_vec.detach().cpu().numpy()}")
-        print(f"  ‖Error‖_2[0]: {torch.norm(e_vec).item():.6f}")
-        print(f"  pos_kernel={pos_kernel}, bounds={bounds_mode}, pos_gain={pos_gain}, sigma_pos={sigma_pos}")
-        print(f"  mean|e|_norm={e[0].abs().mean().item():.4f}, L2^2(e_norm)={e_norm2[0].item():.4f}")
-        print("  Reward terms (env 0):")
-        print(f"    r_pos={r_pos[0].item():.6f}, r_vel={r_vel[0].item():.6f}, "
-              f"r_u={r_u[0].item():.6f}, r_du={r_du[0].item():.6f}, prog={prog[0].item():.6f}")
-        print(f"    TOTAL={r_total[0].item():.6f}")
-
-    return r_total
-
+    return total
 
 
 
