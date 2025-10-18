@@ -205,31 +205,60 @@ class EventCfg:
     )
 
 # -----------------------------------------------------------------------------
-# Rewards
+# Rewards (DeepMimic-style: pose + velocity + regularizers)
 # -----------------------------------------------------------------------------
 
 @configclass
 class RewardsCfg:
+    # ✅ 새 joint_tracking_reward 시그니처에 맞춘 파라미터
     joint_tracking_reward = RewTerm(
-        func=local_rewards.joint_tracking_reward,
+        func=local_rewards.joint_tracking_reward,  # 동일 함수명(내부 구현만 교체)
         weight=1.0,
         params={
-            # 기존
-            "delta": 0.06,
-            "delta_v": 0.15,
-            "w_pos": 0.6,
-            "w_vel": 0.4,
-            "lam_u": 3e-3,
-            "lam_du": 7e-3,
-            "beta_prog": 0.03,
+            # ----- weights -----
+            "w_pose": 0.7,         # 관절 자세 우선
+            "w_vel": 0.3,          # 속도는 보조
+            "w_ee": 0.0,           # EE는 후에 점증(0.05~0.1 권장)
 
-            # 새 옵션(민감도/스케일)
-            "pos_kernel": "mix",       # "huber" | "gauss" | "mix"
-            "pos_gain": 3.0,           # Huber penalty 게인 (민감도 레버)
-            "sigma_pos": 0.15,         # 가우시안 σ (정규화 e 기준)
-            "bounds_mode": "percentile"  # "minmax" | "percentile"
+            # ----- gaussian kernel scales -----
+            "k_pose": 24.0,        # 16~32 범위 탐색
+            "k_vel": 8.0,          # 6~12 범위 탐색
+            "k_ee": 4.0,           # EE 사용시만 의미
+
+            # ----- regularizers -----
+            "lam_u": 3e-3,         # 액션 L1
+            "lam_du": 8e-3,        # 액션 변화율 L1
+
+            # ----- boundary penalty (additive, soft) -----
+            "use_boundary": True,  # 경계 붙으면 켜고, 안정화되면 False 가능
+            "k_boundary": 3.0,
+            "margin": 0.10,
+            "gamma_boundary": 0.2, # 가산 패널티 가중치(작게)
+            "bounds_mode": "percentile",  # joint limit 미제공 시 HDF5 백업 경계
         },
     )
+
+    # (옵션) EE 항 점증 프리셋 예시:
+    # joint_tracking_reward_stronger_ee = RewTerm(
+    #     func=local_rewards.joint_tracking_reward,
+    #     weight=1.0,
+    #     params={
+    #         "w_pose": 0.6,
+    #         "w_vel": 0.3,
+    #         "w_ee": 0.1,        # EE 위치 정합을 조금 반영
+    #         "k_pose": 24.0,
+    #         "k_vel": 8.0,
+    #         "k_ee": 4.0,
+    #         "lam_u": 3e-3,
+    #         "lam_du": 8e-3,
+    #         "use_boundary": True,
+    #         "k_boundary": 3.0,
+    #         "margin": 0.10,
+    #         "gamma_boundary": 0.2,
+    #         "bounds_mode": "percentile",
+    #     },
+    # )
+
 
 
 
