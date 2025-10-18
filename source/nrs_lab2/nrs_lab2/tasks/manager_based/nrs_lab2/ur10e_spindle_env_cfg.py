@@ -205,38 +205,41 @@ class EventCfg:
     )
 
 # -----------------------------------------------------------------------------
-# Rewards (DeepMimic-style: pose + velocity + regularizers)
+# Rewards (DeepMimic + Progress + Multi-step Lookahead)
 # -----------------------------------------------------------------------------
 
 @configclass
 class RewardsCfg:
-    # ✅ 새 joint_tracking_reward 시그니처에 맞춘 파라미터
     joint_tracking_reward = RewTerm(
-        func=local_rewards.joint_tracking_reward,  # 동일 함수명(내부 구현만 교체)
+        func=local_rewards.joint_tracking_reward,  # 동일 함수명 (내부 구현 교체됨)
         weight=1.0,
         params={
             # ----- weights -----
-            "w_pose": 0.7,         # 관절 자세 우선
-            "w_vel": 0.3,          # 속도는 보조
-            "w_ee": 0.0,           # EE는 후에 점증(0.05~0.1 권장)
+            "w_pose": 0.6,         # 자세 중심
+            "w_vel": 0.3,          # 속도 보조
+            "w_prog": 0.02,        # progress term (ReLU 기반, 과도한 진동 억제용)
 
-            # ----- gaussian kernel scales -----
-            "k_pose": 24.0,        # 16~32 범위 탐색
-            "k_vel": 8.0,          # 6~12 범위 탐색
-            "k_ee": 4.0,           # EE 사용시만 의미
+            # ----- exponential kernel scales -----
+            "k_pose": 3.0,         # position kernel gain (부드럽게)
+            "k_vel": 12.0,         # velocity kernel gain (속도 감쇠 강화)
 
             # ----- regularizers -----
-            "lam_u": 3e-3,         # 액션 L1
-            "lam_du": 8e-3,        # 액션 변화율 L1
+            "lam_u": 1e-2,         # action magnitude penalty ↑
+            "lam_du": 5e-2,        # action rate penalty ↑ (진동 억제 핵심)
 
-            # ----- boundary penalty (additive, soft) -----
-            "use_boundary": True,  # 경계 붙으면 켜고, 안정화되면 False 가능
-            "k_boundary": 3.0,
-            "margin": 0.10,
-            "gamma_boundary": 0.2, # 가산 패널티 가중치(작게)
-            "bounds_mode": "percentile",  # joint limit 미제공 시 HDF5 백업 경계
+            # ----- boundary penalty (soft clamp) -----
+            "use_boundary": True,  # joint limit 반영
+            "k_boundary": 1.0,
+            "margin": 0.05,
+            "gamma_boundary": 0.05,
+            "bounds_mode": "percentile",  # joint limit 미정의 시 HDF5 백업 경계 사용
+
+            # ----- multi-step lookahead -----
+            "horizon": 50,         # target joint를 50스텝 미리 관찰 (유지)
         },
     )
+
+
 
     # (옵션) EE 항 점증 프리셋 예시:
     # joint_tracking_reward_stronger_ee = RewTerm(
