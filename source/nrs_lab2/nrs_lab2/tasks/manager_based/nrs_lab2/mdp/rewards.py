@@ -90,7 +90,7 @@ _episode_counter = 0
 def joint_tracking_reward(
     env: "ManagerBasedRLEnv",
     # ===== position error only =====
-    k_pose: float = 8.0,          # kernel gain
+    # k_pose: float = 2.0,          # kernel gain
     horizon: int = 50,            # multi-step lookahead
     decay: float = 0.955,         # exponential decay (50 step -> 0.1×)
 ):
@@ -122,12 +122,22 @@ def joint_tracking_reward(
     q_star_mix = (weights.view(horizon, 1, 1) * q_stars).sum(dim=0)  # weighted mean
 
     # ---------------------------------------------------------
-    # (2) position error reward only
+    # (2) position error reward only (L2 error + joint-wise weighting)
     # ---------------------------------------------------------
-    e_q = q - q_star_mix
-    # r_pos = torch.exp(-k_pose * (e_q ** 2).sum(dim=1))   # v1: L2 제곱 오차 기반
-    r_pos = torch.exp(-k_pose * torch.norm(e_q, dim=1))    # v2: L2 오차 기반
+    e_q = q - q_star_mix     # [N, 6]  현재 - 목표
+
+    # joint별 감쇠 계수 (UR10 예시: 어깨는 완만, 손목은 정밀)
+    # 필요 시 HDF5 기반으로 자동 계산도 가능함
+    k_pose_vec = torch.tensor(
+        [0.5, 2.0, 2.0, 1.0, 2.0, 0.5], device=q.device, dtype=torch.float32
+    ).view(1, -1)   # [1,6] → broadcast 가능
+
+    # joint별 L2 오차 계산 후 가중합
+    weighted_sq_err = (k_pose_vec * (e_q ** 2)).sum(dim=1)  # [N]
+    r_pos = torch.exp(-weighted_sq_err)                     # exp(-Σ k_i * e_i²)
+
     total = r_pos
+
 
     # ---------------------------------------------------------
     # (3) Debug print (10 step마다)
