@@ -1,47 +1,34 @@
 seed: 42
 
-
-# Models are instantiated using skrl's model instantiator utility
-# https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
 models:
   separate: False
-  policy:  # see gaussian_model parameters
+  policy:
     class: GaussianMixin
-    clip_actions: False
+    clip_actions: True          # ✅ 행동을 [-1, 1]로 클립 (발산 방지)
     clip_log_std: True
     min_log_std: -20.0
     max_log_std: 2.0
-    initial_log_std: 0.0
+    initial_log_std: -0.5       # ✅ 초기 exploration 감소
     network:
       - name: net
         input: STATES
-        layers: [32, 32]
+        layers: [64, 64]        # ✅ 더 넓은 표현력 (imitation 안정성 향상)
         activations: elu
     output: ACTIONS
-  value:  # see deterministic_model parameters
+  value:
     class: DeterministicMixin
     clip_actions: False
     network:
       - name: net
         input: STATES
-        layers: [32, 32]
+        layers: [64, 64]
         activations: elu
     output: ONE
 
-
-
-
-
-
-# Rollout memory
-# https://skrl.readthedocs.io/en/latest/api/memories/random.html
 memory:
   class: RandomMemory
-  memory_size: -1  # automatically determined (same as agent:rollouts)
+  memory_size: -1
 
-
-# PPO agent configuration (field names are from PPO_DEFAULT_CONFIG)
-# https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
   class: PPO
   rollouts: 32
@@ -49,44 +36,45 @@ agent:
   mini_batches: 8
   discount_factor: 0.99
   lambda: 0.95
-  learning_rate: 5.0e-04
+
+  # ✅ 안정화 핵심 튜닝
+  learning_rate: 3.0e-05         # 🔹 발산 방지용 (기존 5e-4 → 3e-5)
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.008
+    kl_threshold: 0.01
+
+  grad_norm_clip: 0.5            # 🔹 gradient 폭주 방지
+  ratio_clip: 0.2
+  value_clip: 0.2
+  clip_predicted_values: True
+
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
   value_preprocessor: RunningStandardScaler
   value_preprocessor_kwargs: null
+
   random_timesteps: 0
   learning_starts: 0
-  grad_norm_clip: 1.0
-  ratio_clip: 0.2
-  value_clip: 0.2
-  clip_predicted_values: True
-  entropy_loss_scale: 0.0
-  value_loss_scale: 2.0
-  kl_threshold: 0.0
-  rewards_shaper_scale: 0.1
+
+  # ✅ 안정화 loss weight 조정
+  entropy_loss_scale: 0.001       # 🔹 exploration 완화
+  value_loss_scale: 0.5           # 🔹 과도한 critic 학습 억제
+  rewards_shaper_scale: 1.0       # 🔹 reward 0~1 범위 그대로 유지
   time_limit_bootstrap: False
-  # logging and checkpoint
+
+  # ✅ 관측 정규화 + 클리핑 (Isaac Lab 필수)
+  normalize_observations: True
+  clip_observations: 5.0
+  clip_actions: 1.0
+
+  # ✅ logging 및 checkpoint
   experiment:
-    directory: "cartpole_direct"
-    experiment_name: ""
+    directory: "ur10e_spindle_bc_stable"
+    experiment_name: "ppo_stable_v12"
     write_interval: auto
     checkpoint_interval: auto
 
-
-
-
-
-
-
-
-
-
-# Sequential trainer
-# https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 100000
+  timesteps: 300000
   environment_info: log
