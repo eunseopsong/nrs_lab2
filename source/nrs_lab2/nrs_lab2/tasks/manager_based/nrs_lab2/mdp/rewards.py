@@ -136,7 +136,7 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     # ---------------------------------------------------------
     # (5) Weighted total reward (DeepMimic imitation weights)
     # ---------------------------------------------------------
-    w_p = 0.65
+    w_p = 0.9
     w_v = 0.1
     total = w_p * r_p + w_v * r_v
 
