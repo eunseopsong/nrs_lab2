@@ -219,32 +219,6 @@ class RewardsCfg:
 
 
 
-
-
-    # (옵션) EE 항 점증 프리셋 예시:
-    # joint_tracking_reward_stronger_ee = RewTerm(
-    #     func=local_rewards.joint_tracking_reward,
-    #     weight=1.0,
-    #     params={
-    #         "w_pose": 0.6,
-    #         "w_vel": 0.3,
-    #         "w_ee": 0.1,        # EE 위치 정합을 조금 반영
-    #         "k_pose": 24.0,
-    #         "k_vel": 8.0,
-    #         "k_ee": 4.0,
-    #         "lam_u": 3e-3,
-    #         "lam_du": 8e-3,
-    #         "use_boundary": True,
-    #         "k_boundary": 3.0,
-    #         "margin": 0.10,
-    #         "gamma_boundary": 0.2,
-    #         "bounds_mode": "percentile",
-    #     },
-    # )
-
-
-
-
     # (2) Contact stability reward
     # contact_force_reward = RewTerm(
     #     func=local_rewards.contact_force_reward,
