@@ -1,7 +1,7 @@
 import numpy as np
 import h5py
 
-def process_joint_recording(input_txt, output_txt, window_size=1000, scale_factor=3):
+def process_joint_recording(input_txt, output_txt, window_size=100, scale_factor=5):
     # 1. txt 불러오기
     data = np.loadtxt(input_txt)
 

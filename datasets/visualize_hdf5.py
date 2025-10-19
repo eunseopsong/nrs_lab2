@@ -3,8 +3,8 @@ import h5py
 import matplotlib.pyplot as plt
 
 def main():
-    file_path = "joint_recording.h5"  # 같은 폴더에 있는 경우
-    # file_path = "joint_recording_filtered.h5"  # 같은 폴더에 있는 경우
+    # file_path = "joint_recording.h5"  # 같은 폴더에 있는 경우
+    file_path = "joint_recording_filtered.h5"  # 같은 폴더에 있는 경우
 
     # HDF5 파일 열기
     with h5py.File(file_path, "r") as f:
