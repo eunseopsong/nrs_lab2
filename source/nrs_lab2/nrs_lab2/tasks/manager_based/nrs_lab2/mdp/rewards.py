@@ -91,8 +91,7 @@ def joint_tracking_reward(
     env: "ManagerBasedRLEnv",
     # ===== position error only =====
     # k_pose: float = 2.0,          # kernel gain
-    horizon: int = 50,            # multi-step lookahead
-    decay: float = 0.955,         # exponential decay (50 step -> 0.1×)
+
 ):
     """
     v1: Position-only reward
@@ -106,65 +105,64 @@ def joint_tracking_reward(
     dt = getattr(env.sim, "dt", 1.0 / 120.0) * getattr(env, "decimation", 1)
 
     # ---------------------------------------------------------
-    # (1) Target horizon 확장 (지수 감쇠 적용)
+    # (1) Target horizon: single-step (no exponential decay)
     # ---------------------------------------------------------
-    fut = get_hdf5_target_future(env, horizon=horizon)  # [N, 6*horizon]
+    fut = get_hdf5_target_future(env, horizon=2)  # [N, 6*horizon]
     D = q.shape[1]
-
-    q_stars = []
-    for i in range(horizon):
-        q_stars.append(fut[:, i * D:(i + 1) * D])
-    q_stars = torch.stack(q_stars, dim=0)  # [horizon, N, 6]
-
-    # exponential decay weights (1.0, 0.955, 0.955^2, ...)
-    weights = torch.pow(decay, torch.arange(horizon, device=q.device).float())
-    weights = weights / weights.sum()
-    q_star_mix = (weights.view(horizon, 1, 1) * q_stars).sum(dim=0)  # weighted mean
+    q_star_next = fut[:, D:2*D]                   # t+1 시점 target만 사용
 
     # ---------------------------------------------------------
-    # (2) position error reward only (L2 error + joint-wise weighting)
+    # (2) position error reward only (L2 error normalization)
     # ---------------------------------------------------------
-    e_q = q - q_star_mix     # [N, 6]  현재 - 목표
+    e_q = q - q_star_next                         # [N, 6]
+    # joint-wise normalization (to [0,1])
+    e_min, _ = torch.min(e_q, dim=1, keepdim=True)
+    e_max, _ = torch.max(e_q, dim=1, keepdim=True)
+    norm_e_q = (e_q - e_min) / (e_max - e_min + 1e-8)
 
-    # joint별 감쇠 계수 (UR10 예시: 어깨는 완만, 손목은 정밀)
-    # 필요 시 HDF5 기반으로 자동 계산도 가능함
-    k_pose_vec = torch.tensor(
-        [0.75, 4.0, 4.0, 1.5, 4.0, 0.75], device=q.device, dtype=torch.float32
-    ).view(1, -1)   # [1,6] → broadcast 가능
-
-    # joint별 L2 오차 계산 후 가중합
-    weighted_sq_err = (k_pose_vec * (e_q ** 2)).sum(dim=1)  # [N]
-    r_pos = torch.exp(-weighted_sq_err)                     # exp(-Σ k_i * e_i²)
+    # single global sensitivity (k_pose)
+    k_pose = 4.0
+    # L2 norm of normalized error
+    l2_error = torch.norm(norm_e_q, dim=1)        # [N]
+    r_pos = torch.exp(-k_pose * l2_error)
 
     total = r_pos
 
 
 
+
     # ---------------------------------------------------------
-    # (3) Debug print (10 step마다)
+    # (3) Debug print (every 10 steps)
     # ---------------------------------------------------------
     step = int(env.common_step_counter)
     if step % 10 == 0:
         with torch.no_grad():
-            mean_err = torch.norm(e_q, dim=1).mean().item()
-            print(f"[Step {step}] v1: Position-only reward (exp decay)")
-            print(f"  mean |e_q|_2={mean_err:.4f}")
-            print(f"  r_pos={r_pos[0].item():.6f}")
-            print(f"  Target mix[0]: {q_star_mix[0].detach().cpu().numpy()}")
-            print(f"  Current joints[0]: {q[0].detach().cpu().numpy()}")
+            mean_err_raw = torch.norm(e_q, dim=1).mean().item()       # 비정규화 에러
+            mean_err_norm = torch.norm(norm_e_q, dim=1).mean().item() # 정규화된 에러
+            r_val = r_pos[0].item()
+
+            print(f"[Step {step}] v2: Position-only reward (normalized, single-step)")
+            print(f"  mean |e_q|_2 (raw)   = {mean_err_raw:.4f}")
+            print(f"  mean |e_q|_2 (norm.) = {mean_err_norm:.4f}")
+            print(f"  r_pos (env0)         = {r_val:.6f}")
+            print(f"  Target (t+1)[0]:     {q_star_next[0].detach().cpu().numpy()}")
+            print(f"  Current joints[0]:   {q[0].detach().cpu().numpy()}")
+            print(f"  Error (q - q* )[0]:  {e_q[0].detach().cpu().numpy()}")
 
     # ---------------------------------------------------------
     # (4) History & Visualization (env0 only)
     # ---------------------------------------------------------
     if "_joint_tracking_history" in globals():
         globals()["_joint_tracking_history"].append(
-            (step, q_star_mix[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
+            (step, q_star_next[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
         )
 
+    # episode 종료 시 시각화 (env0)
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         if step > 0 and step % int(env.max_episode_length) == 0:
             if "_joint_tracking_history" in globals() and globals()["_joint_tracking_history"]:
                 save_joint_tracking_plot(env)
+
 
     return total
 
