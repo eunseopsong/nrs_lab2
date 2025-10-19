@@ -76,7 +76,7 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 
 
 # -------------------
-# Joint tracking reward (v1: position error only, exponential decay)
+# Joint tracking reward (v6: position error only, linear scaled clipping)
 # -------------------
 
 import torch
@@ -87,17 +87,18 @@ matplotlib.use("Agg")
 _joint_bounds = None
 _episode_counter = 0
 
-def joint_tracking_reward(
-    env: "ManagerBasedRLEnv",
-    # ===== position error only =====
-    # k_pose: float = 2.0,          # kernel gain
 
-):
+def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     """
-    v1: Position-only reward
-    ------------------------
-    r = exp(-k_pose * ||q - q*_mix||^2)
-    where q*_mix = Σ_i (decay^i * q*_{t+i}) / Σ_i decay^i
+    v6: Position-only reward (linear scaled clipping)
+    -------------------------------------------------
+    r = exp(-k_pose * clip(||q - q*||_2 / max_error, 0, 1))
+
+    특징:
+    - target: t+1 시점 단일 step
+    - L2 error 기반 linear scaling (0→0, max_error→1)
+    - max_error = 2.0 rad 기준
+    - exp(-k_pose * scaled_error) 형태
     """
 
     robot = env.scene["robot"]
@@ -109,27 +110,23 @@ def joint_tracking_reward(
     # ---------------------------------------------------------
     fut = get_hdf5_target_future(env, horizon=2)  # [N, 6*horizon]
     D = q.shape[1]
-    q_star_next = fut[:, D:2*D]                   # t+1 시점 target만 사용
+    q_star_next = fut[:, D:2 * D]                 # t+1 시점 target만 사용
 
     # ---------------------------------------------------------
-    # (2) position error reward only (L2 error normalization)
+    # (2) position error reward only (linear scaled clipping)
     # ---------------------------------------------------------
     e_q = q - q_star_next                         # [N, 6]
-    # joint-wise normalization (to [0,1])
-    e_min, _ = torch.min(e_q, dim=1, keepdim=True)
-    e_max, _ = torch.max(e_q, dim=1, keepdim=True)
-    norm_e_q = (e_q - e_min) / (e_max - e_min + 1e-8)
+    l2_error = torch.norm(e_q, dim=1)             # [N]
 
-    # single global sensitivity (k_pose)
+    # Linear scaling: 0 → 0, max_error → 1
+    max_error = 2.0
+    l2_error_clipped = torch.clamp(l2_error / max_error, 0.0, 1.0)
+
+    # Reward computation
     k_pose = 4.0
-    # L2 norm of normalized error
-    l2_error = torch.norm(norm_e_q, dim=1)        # [N]
-    r_pos = torch.exp(-k_pose * l2_error)
+    r_pos = torch.exp(-k_pose * l2_error_clipped)
 
     total = r_pos
-
-
-
 
     # ---------------------------------------------------------
     # (3) Debug print (every 10 steps)
@@ -137,17 +134,18 @@ def joint_tracking_reward(
     step = int(env.common_step_counter)
     if step % 10 == 0:
         with torch.no_grad():
-            mean_err_raw = torch.norm(e_q, dim=1).mean().item()       # 비정규화 에러
-            mean_err_norm = torch.norm(norm_e_q, dim=1).mean().item() # 정규화된 에러
+            mean_err_raw = l2_error.mean().item()
+            mean_err_clip = l2_error_clipped.mean().item()
             r_val = r_pos[0].item()
 
-            print(f"[Step {step}] v2: Position-only reward (normalized, single-step)")
+            print(f"[Step {step}] v6: Position-only reward (linear scaled clipping)")
             print(f"  mean |e_q|_2 (raw)   = {mean_err_raw:.4f}")
-            print(f"  mean |e_q|_2 (norm.) = {mean_err_norm:.4f}")
+            print(f"  mean |e_q|_2 (clip)  = {mean_err_clip:.4f}")
             print(f"  r_pos (env0)         = {r_val:.6f}")
             print(f"  Target (t+1)[0]:     {q_star_next[0].detach().cpu().numpy()}")
             print(f"  Current joints[0]:   {q[0].detach().cpu().numpy()}")
             print(f"  Error (q - q* )[0]:  {e_q[0].detach().cpu().numpy()}")
+            print("-" * 80)
 
     # ---------------------------------------------------------
     # (4) History & Visualization (env0 only)
@@ -157,12 +155,10 @@ def joint_tracking_reward(
             (step, q_star_next[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
         )
 
-    # episode 종료 시 시각화 (env0)
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         if step > 0 and step % int(env.max_episode_length) == 0:
             if "_joint_tracking_history" in globals() and globals()["_joint_tracking_history"]:
                 save_joint_tracking_plot(env)
-
 
     return total
 
