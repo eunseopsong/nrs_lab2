@@ -137,31 +137,31 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     # ---------------------------------------------------------
     e_q = q - q_star_next
     pose_term = torch.sum(e_q ** 2, dim=1)
-    r_p = torch.exp(-1.5 * pose_term)  # smoother exponent
+    r_p = torch.exp(-2.0 * pose_term)  # smoother exponent
 
     # ---------------------------------------------------------
     # (4) Velocity reward (DeepMimic style)
     # ---------------------------------------------------------
     e_qd = qd - qd_star
     vel_term = torch.sum(e_qd ** 2, dim=1)
-    r_v = torch.exp(-0.05 * vel_term)
+    r_v = torch.exp(-0.10 * vel_term)
 
     # ---------------------------------------------------------
     # (5) Penalty reward (joint-wise linear proportional)
     # ---------------------------------------------------------
-    joint_thresholds = torch.tensor(
-        [1.0, 0.3, 0.8, 0.3, 0.6, 0.6], device=e_q.device
-    ).unsqueeze(0)  # [1,6]
+    # joint_thresholds = torch.tensor(
+    #     [1.0, 0.3, 0.8, 0.3, 0.6, 0.6], device=e_q.device
+    # ).unsqueeze(0)  # [1,6]
 
-    violation_ratio = torch.relu(torch.abs(e_q) - joint_thresholds) / joint_thresholds  # [N,6]
-    mean_violation_ratio = torch.mean(violation_ratio, dim=1)
-    r_penalty = torch.clamp(1.0 - 0.3 * mean_violation_ratio, 0.0, 1.0)  # linear decay
+    # violation_ratio = torch.relu(torch.abs(e_q) - joint_thresholds) / joint_thresholds  # [N,6]
+    # mean_violation_ratio = torch.mean(violation_ratio, dim=1)
+    # r_penalty = torch.clamp(1.0 - 0.3 * mean_violation_ratio, 0.0, 1.0)  # linear decay
 
     # ---------------------------------------------------------
     # (6) Weighted total reward (stable weights)
     # ---------------------------------------------------------
-    w_p, w_v, w_pen = 0.75, 0.15, 0.10
-    total = w_p * r_p + w_v * r_v + w_pen * r_penalty
+    w_p, w_v = 0.90, 0.10
+    total = w_p * r_p + w_v * r_v
 
     # reward normalization for stability
     total = torch.clamp(total, 0.0, 1.0)
@@ -178,7 +178,7 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
             print(f"  mean |e_qd|_2  = {mean_e_qd:.4f}")
             print(f"  r_p (env0)     = {r_p[0].item():.4f}")
             print(f"  r_v (env0)     = {r_v[0].item():.4f}")
-            print(f"  r_penalty(env0)= {r_penalty[0].item():.4f}")
+            # print(f"  r_penalty(env0)= {r_penalty[0].item():.4f}")
             print(f"  total (env0)   = {total[0].item():.4f}")
             print("-" * 80)
 
