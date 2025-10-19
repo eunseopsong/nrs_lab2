@@ -78,7 +78,7 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 
 
 # -------------------
-# Joint tracking reward (v7: position + velocity error + joint-wise clipped debug)
+# Joint tracking reward (v8: joint-wise clipped + averaged L2 error)
 # -------------------
 
 import torch
@@ -92,13 +92,11 @@ _episode_counter = 0
 
 def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     """
-    v7: Position + Velocity reward
-    ------------------------------
-    r = w_pos * exp(-k_pose * clip(||q - q*||_2 / max_pos_error, 0, 1))
-      + w_vel * exp(-k_vel  * clip(||qd - qd*||_2 / max_vel_error, 0, 1))
-
-    - position: 2 rad 기준
-    - velocity: 3 rad/s 기준
+    v8: Position + Velocity reward (joint-wise clipped, averaged)
+    -------------------------------------------------------------
+    각 joint별로 clipped error 계산 후 평균 내어 L2-norm 기반 reward 계산.
+    r_total = w_pos * exp(-k_pose * mean(clipped_pos_error))
+            + w_vel * exp(-k_vel  * mean(clipped_vel_error))
     """
 
     # ---------------------------------------------------------
@@ -108,41 +106,43 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     q = robot.data.joint_pos[:, :6]
     qd = robot.data.joint_vel[:, :6]
     dt = getattr(env.sim, "dt", 1.0 / 120.0) * getattr(env, "decimation", 1)
+    D = q.shape[1]  # number of joints
 
     # ---------------------------------------------------------
     # (2) Target horizon: single-step (no exponential decay)
     # ---------------------------------------------------------
     fut = get_hdf5_target_future(env, horizon=2)
-    D = q.shape[1]
-    q_star_next = fut[:, D:2 * D]
     q_star_curr = fut[:, :D]
+    q_star_next = fut[:, D:2 * D]
     qd_star = (q_star_next - q_star_curr) / (dt + 1e-8)
 
     # ---------------------------------------------------------
-    # (3) Position error (linear scaled clipping)
+    # (3) Position error (joint-wise clipping + mean aggregation)
     # ---------------------------------------------------------
-    e_q = q - q_star_next
-    l2_error_pos = torch.norm(e_q, dim=1)
+    e_q = q - q_star_next  # [N, 6]
     max_pos_error = 2.0
-    l2_error_pos_clipped = torch.clamp(l2_error_pos / max_pos_error, 0.0, 0.5)
-    jointwise_pos_clipped = torch.clamp(torch.abs(e_q) / max_pos_error, 0.0, 0.5)
-    r_pos = torch.exp(-8.0 * l2_error_pos_clipped)
+    joint_pos_clipped = torch.clamp(torch.abs(e_q) / max_pos_error, 0.0, 1.0)  # [N,6]
+    mean_pos_clip = torch.mean(joint_pos_clipped, dim=1)                      # [N]
+
+    k_pose = 8.0
+    r_pos = torch.exp(-k_pose * mean_pos_clip)                                # [N]
 
     # ---------------------------------------------------------
-    # (4) Velocity error (linear scaled clipping)
+    # (4) Velocity error (joint-wise clipping + mean aggregation)
     # ---------------------------------------------------------
-    e_qd = qd - qd_star
-    l2_error_vel = torch.norm(e_qd, dim=1)
+    e_qd = qd - qd_star  # [N, 6]
     max_vel_error = 3.0
-    l2_error_vel_clipped = torch.clamp(l2_error_vel / max_vel_error, 0.0, 1.0)
-    jointwise_vel_clipped = torch.clamp(torch.abs(e_qd) / max_vel_error, 0.0, 1.0)
-    r_vel = torch.exp(-3.0 * l2_error_vel_clipped)
+    joint_vel_clipped = torch.clamp(torch.abs(e_qd) / max_vel_error, 0.0, 1.0)  # [N,6]
+    mean_vel_clip = torch.mean(joint_vel_clipped, dim=1)                        # [N]
+
+    k_vel = 3.0
+    r_vel = torch.exp(-k_vel * mean_vel_clip)                                   # [N]
 
     # ---------------------------------------------------------
     # (5) Weighted total reward
     # ---------------------------------------------------------
-    w_pos = 0.8
-    w_vel = 0.2
+    w_pos = 0.7
+    w_vel = 0.3
     total = w_pos * r_pos + w_vel * r_vel
 
     # ---------------------------------------------------------
@@ -151,17 +151,17 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     step = int(env.common_step_counter)
     if step % 10 == 0:
         with torch.no_grad():
-            mean_pos_raw = l2_error_pos.mean().item()
-            mean_vel_raw = l2_error_vel.mean().item()
-            mean_pos_clip = l2_error_pos_clipped.mean().item()
-            mean_vel_clip = l2_error_vel_clipped.mean().item()
+            mean_pos_raw = torch.norm(e_q, dim=1).mean().item()
+            mean_vel_raw = torch.norm(e_qd, dim=1).mean().item()
+            mean_pos_clip_val = mean_pos_clip.mean().item()
+            mean_vel_clip_val = mean_vel_clip.mean().item()
             r_val = total[0].item()
 
-            print(f"[Step {step}] v7: Position + Velocity reward")
+            print(f"[Step {step}] v8: Position + Velocity reward (joint-wise clipped + averaged)")
             print(f"  mean |e_q|_2 (raw)   = {mean_pos_raw:.4f}")
             print(f"  mean |e_qd|_2 (raw)  = {mean_vel_raw:.4f}")
-            print(f"  mean |e_q|_2 (clip)  = {mean_pos_clip:.4f}")
-            print(f"  mean |e_qd|_2 (clip) = {mean_vel_clip:.4f}")
+            print(f"  mean |e_q|_clip(avg) = {mean_pos_clip_val:.4f}")
+            print(f"  mean |e_qd|_clip(avg)= {mean_vel_clip_val:.4f}")
             print(f"  r_pos (env0)         = {r_pos[0].item():.6f}")
             print(f"  r_vel (env0)         = {r_vel[0].item():.6f}")
             print(f"  total (env0)         = {r_val:.6f}")
@@ -171,10 +171,8 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
             print(f"  Error (qd - qd* )[0]:{e_qd[0].detach().cpu().numpy()}")
 
             # 🔹 각 조인트별 clipped error 출력
-            pos_clip_vals = jointwise_pos_clipped[0].detach().cpu().numpy()
-            vel_clip_vals = jointwise_vel_clipped[0].detach().cpu().numpy()
-            pos_clip_str = ", ".join([f"{v:.3f}" for v in pos_clip_vals])
-            vel_clip_str = ", ".join([f"{v:.3f}" for v in vel_clip_vals])
+            pos_clip_str = ", ".join([f"{v:.3f}" for v in joint_pos_clipped[0].detach().cpu().numpy()])
+            vel_clip_str = ", ".join([f"{v:.3f}" for v in joint_vel_clipped[0].detach().cpu().numpy()])
             print(f"  Joint-wise pos clipped errors: [{pos_clip_str}]")
             print(f"  Joint-wise vel clipped errors: [{vel_clip_str}]")
             print("-" * 90)
@@ -193,7 +191,6 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
                 save_joint_tracking_plot(env)
 
     return total
-
 
 
 
