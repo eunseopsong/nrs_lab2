@@ -135,14 +135,14 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     joint_vel_clipped = torch.clamp(torch.abs(e_qd) / max_vel_error, 0.0, 1.0)  # [N,6]
     mean_vel_clip = torch.mean(joint_vel_clipped, dim=1)                        # [N]
 
-    k_vel = 3.0
+    k_vel = 0.4
     r_vel = torch.exp(-k_vel * mean_vel_clip)                                   # [N]
 
     # ---------------------------------------------------------
     # (5) Weighted total reward
     # ---------------------------------------------------------
-    w_pos = 0.7
-    w_vel = 0.3
+    w_pos = 0.8
+    w_vel = 0.2
     total = w_pos * r_pos + w_vel * r_vel
 
     # ---------------------------------------------------------
