@@ -35,7 +35,7 @@ class PolishingPoseHoldEnvCfg(UR10eSpindleEnvCfg):
             func=local_obs.load_hdf5_trajectory,
             mode="reset",
             params={
-                "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording.h5",
+                "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.h5",
                 "dataset_key": "joint_positions",
             },
         )
