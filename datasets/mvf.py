@@ -9,10 +9,10 @@ def process_joint_recording(input_txt, output_txt, window_size=100, scale_factor
     cumsum = np.cumsum(np.insert(data, 0, 0, axis=0), axis=0)
     filtered = (cumsum[window_size:] - cumsum[:-window_size]) / window_size
 
-    # 앞뒤 window_size 행 제거
-    trimmed = filtered[window_size:-window_size]
+    # 🔹 앞뒤 window_size * 2 행 제거
+    trimmed = filtered[2 * window_size : -2 * window_size]
 
-    # 3. 선형보간으로 길이 5배 확장
+    # 3. 선형보간으로 길이 확장
     n, d = trimmed.shape
     x_old = np.linspace(0, 1, n)
     x_new = np.linspace(0, 1, n * scale_factor)
