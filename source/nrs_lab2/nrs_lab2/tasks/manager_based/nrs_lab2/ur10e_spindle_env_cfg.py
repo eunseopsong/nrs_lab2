@@ -214,10 +214,6 @@ class RewardsCfg:
     joint_tracking_reward = RewTerm(
         func=local_rewards.joint_tracking_reward,  # 동일 함수명 (v1 내부 구현)
         weight=1.0,
-        params={
-            # ----- position reward only -----
-            # "k_pose": 2.0,          # position kernel gain
-        },
     )
 
 
