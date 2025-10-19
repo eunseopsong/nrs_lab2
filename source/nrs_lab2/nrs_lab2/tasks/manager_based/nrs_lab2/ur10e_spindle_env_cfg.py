@@ -196,7 +196,7 @@ class EventCfg:
     reset_robot_joints = EventTerm(
         func=mdp.reset_joints_by_scale,
         mode="reset",
-        params={"position_range": (0.75, 1.25), "velocity_range": (0.0, 0.0)},
+        params={"position_range": (1.0, 1.0), "velocity_range": (0.0, 0.0)},
     )
     load_hdf5 = EventTerm(
         func=local_obs.load_hdf5_trajectory,
