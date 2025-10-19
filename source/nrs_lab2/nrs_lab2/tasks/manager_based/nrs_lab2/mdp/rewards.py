@@ -140,7 +140,7 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
         [1.0, 0.3, 0.8, 0.3, 0.6, 0.6], device=e_q.device
     ).unsqueeze(0)  # [1,6]
 
-    k_penalty = 10.0
+    k_penalty = 4.0
     violation_ratio = torch.relu(torch.abs(e_q) - joint_thresholds) / joint_thresholds  # [N,6]
     total_violation_ratio = torch.sum(violation_ratio, dim=1)
     r_penalty = torch.exp(-k_penalty * total_violation_ratio)
