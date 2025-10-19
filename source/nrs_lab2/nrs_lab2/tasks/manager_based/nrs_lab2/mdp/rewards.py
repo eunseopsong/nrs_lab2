@@ -124,9 +124,9 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     e_q = q - q_star_next
     l2_error_pos = torch.norm(e_q, dim=1)
     max_pos_error = 2.0
-    l2_error_pos_clipped = torch.clamp(l2_error_pos / max_pos_error, 0.0, 1.0)
-    jointwise_pos_clipped = torch.clamp(torch.abs(e_q) / max_pos_error, 0.0, 1.0)
-    r_pos = torch.exp(-4.0 * l2_error_pos_clipped)
+    l2_error_pos_clipped = torch.clamp(l2_error_pos / max_pos_error, 0.0, 0.5)
+    jointwise_pos_clipped = torch.clamp(torch.abs(e_q) / max_pos_error, 0.0, 0.5)
+    r_pos = torch.exp(-8.0 * l2_error_pos_clipped)
 
     # ---------------------------------------------------------
     # (4) Velocity error (linear scaled clipping)
