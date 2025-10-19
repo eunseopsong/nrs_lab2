@@ -75,8 +75,10 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
     return reward
 
 
+
+
 # -------------------
-# Joint tracking reward (v6: position error only, linear scaled clipping)
+# Joint tracking reward (v6: position error only, linear scaled clipping + jointwise debug)
 # -------------------
 
 import torch
@@ -122,6 +124,9 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     max_error = 2.0
     l2_error_clipped = torch.clamp(l2_error / max_error, 0.0, 1.0)
 
+    # Joint-wise clipped error (for debugging)
+    jointwise_clipped = torch.clamp(torch.abs(e_q) / max_error, 0.0, 1.0)
+
     # Reward computation
     k_pose = 4.0
     r_pos = torch.exp(-k_pose * l2_error_clipped)
@@ -145,6 +150,11 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
             print(f"  Target (t+1)[0]:     {q_star_next[0].detach().cpu().numpy()}")
             print(f"  Current joints[0]:   {q[0].detach().cpu().numpy()}")
             print(f"  Error (q - q* )[0]:  {e_q[0].detach().cpu().numpy()}")
+
+            # 🔹 각 조인트별 clipped error 출력
+            joint_clip_vals = jointwise_clipped[0].detach().cpu().numpy()
+            joint_clip_str = ", ".join([f"{v:.3f}" for v in joint_clip_vals])
+            print(f"  Joint-wise clipped errors: [{joint_clip_str}]")
             print("-" * 80)
 
     # ---------------------------------------------------------
@@ -161,6 +171,7 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
                 save_joint_tracking_plot(env)
 
     return total
+
 
 
 
