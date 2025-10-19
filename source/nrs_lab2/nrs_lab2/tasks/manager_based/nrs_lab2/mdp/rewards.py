@@ -137,7 +137,7 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     # (5) Penalty reward (joint-wise proportional)
     # ---------------------------------------------------------
     joint_thresholds = torch.tensor(
-        [1.0, 0.5, 0.8, 0.5, 0.6, 0.6], device=e_q.device
+        [1.0, 0.3, 0.8, 0.3, 0.6, 0.6], device=e_q.device
     ).unsqueeze(0)  # [1,6]
 
     k_penalty = 10.0
@@ -148,7 +148,7 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     # ---------------------------------------------------------
     # (6) Weighted total reward
     # ---------------------------------------------------------
-    w_p, w_v, w_pen = 0.7, 0.1, 0.2
+    w_p, w_v, w_pen = 0.65, 0.1, 0.25
     total = w_p * r_p + w_v * r_v + w_pen * r_penalty
 
     # ---------------------------------------------------------
@@ -177,7 +177,7 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
             print("-" * 90)
 
     # ---------------------------------------------------------
-    # (8) History & Visualization (improved)
+    # (8) History & Visualization (colored + single save per episode)
     # ---------------------------------------------------------
     if "_joint_tracking_history" in globals():
         globals()["_joint_tracking_history"].append(
@@ -186,7 +186,8 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
 
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         episode_steps = int(env.max_episode_length)
-        if step > 0 and (step % episode_steps == 0 or step % episode_steps == episode_steps - 1):
+        # 🔹 마지막 스텝(episode 종료 시점)에서만 저장
+        if step > 0 and (step % episode_steps == episode_steps - 1):
             if "_joint_tracking_history" in globals() and globals()["_joint_tracking_history"]:
                 history = globals()["_joint_tracking_history"]
                 save_dir = os.path.expanduser("~/nrs_lab2/outputs/png/")
@@ -196,10 +197,13 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
                 targets = np.vstack(targets)
                 currents = np.vstack(currents)
 
+                # 🔹 Joint 색상 지정
+                colors = ["red", "green", "blue", "orange", "purple", "gray"]
+
                 plt.figure(figsize=(10, 6))
                 for j in range(targets.shape[1]):
-                    plt.plot(targets[:, j], "--", label=f"Target q{j+1}")
-                    plt.plot(currents[:, j], "-", label=f"Current q{j+1}")
+                    plt.plot(targets[:, j], linestyle="--", color=colors[j], label=f"Target q{j+1}")
+                    plt.plot(currents[:, j], linestyle="-", color=colors[j], label=f"Current q{j+1}")
                 plt.xlabel("Step")
                 plt.ylabel("Joint angle [rad]")
                 plt.title("Joint Tracking (v12)")
@@ -212,6 +216,7 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
                 plt.close()
                 print(f"✅ Saved joint tracking plot → {filename}")
 
+                # 🔹 히스토리 초기화 및 episode 카운터 증가
                 globals()["_joint_tracking_history"].clear()
                 globals()["_episode_counter"] = globals().get("_episode_counter", 0) + 1
 
