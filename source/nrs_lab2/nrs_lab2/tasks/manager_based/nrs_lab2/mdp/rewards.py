@@ -84,16 +84,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 _joint_tracking_history = []
+_reward_history = []
 _episode_counter = 0
 
 def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     """
-    v17: q2 Drift-Damped Reward (exp kernel)
-    ----------------------------------------
+    v17-2: q2 Drift-Damped Reward (exp kernel + reward visualization)
+    ------------------------------------------------------------------
     - Exponential kernel (no tanh)
     - Stronger q2 stabilization via velocity damping
     - Weighted bias correction
     - q2 weight = 2.0, q4 weight = 1.3
+    - 각 episode 종료 시 joint별 reward 그래프 저장
     """
 
     robot = env.scene["robot"]
@@ -111,26 +113,24 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     # -------- errors --------
     e_q  = q  - q_star_next
     e_qd = qd - qd_star
-    D = q.shape[1]
 
     # -------- joint weights (q2=2.0, q4=1.3) --------
-    wj = torch.tensor([1, 2.0, 1, 2.0, 1, 1], device=q.device).unsqueeze(0)
+    wj = torch.tensor([1, 2.0, 1, 4.0, 1, 1], device=q.device).unsqueeze(0)
     e_q2  = wj * (e_q**2)
     e_qd2 = wj * (e_qd**2)
 
     # -------- joint-dependent gains --------
-    k_pos = torch.tensor([1.0, 8.0, 2.0, 8.0, 2.0, 2.0], device=q.device).unsqueeze(0)  # 각 joint 별 k_pos
-    k_vel = torch.tensor([0.10, 0.40, 0.10, 0.40, 0.10, 0.10], device=q.device).unsqueeze(0)  # (옵션)
-    # v19
-
-
+    k_pos = torch.tensor([1.0, 8.0, 2.0, 6.0, 2.0, 2.0], device=q.device).unsqueeze(0)
+    k_vel = torch.tensor([0.10, 0.40, 0.10, 0.40, 0.10, 0.10], device=q.device).unsqueeze(0)
+    # v20
 
 
     # -------- base rewards --------
-    r_pose = torch.exp(-k_pos * e_q2)      # joint별 감쇠
-    r_pose = torch.sum(r_pose, dim=1)     # 평균 or 합산 (원하는 방식으로)
-    r_vel  = torch.exp(-k_vel * e_qd2)
-    r_vel  = torch.sum(r_vel, dim=1)
+    r_pose_jointwise = torch.exp(-k_pos * e_q2)      # shape: [num_envs, 6]
+    r_vel_jointwise  = torch.exp(-k_vel * e_qd2)
+
+    r_pose = torch.sum(r_pose_jointwise, dim=1)
+    r_vel  = torch.sum(r_vel_jointwise, dim=1)
 
     # -------- total reward --------
     total = 0.9 * r_pose + 0.1 * r_vel
@@ -139,20 +139,21 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     if step % 10 == 0:
         mean_e_q = torch.norm(e_q, dim=1).mean()
         mean_total = total.mean()
-
-        # 각 조인트별 평균 절댓값 오차 및 r_pose 계산
         e_q_abs_mean_per_joint = torch.mean(torch.abs(e_q), dim=0).detach().cpu().numpy()
-        r_pose_per_joint = torch.mean(torch.exp(-k_pos * e_q2), dim=0).detach().cpu().numpy()
+        r_pose_per_joint = torch.mean(r_pose_jointwise, dim=0).detach().cpu().numpy()
 
         print(f"[Step {step}] mean(e_q)={mean_e_q:.3f}, r_total={mean_total:.3f}")
         for j in range(D):
             print(f"    joint{j+1}: |mean(e_q)|={e_q_abs_mean_per_joint[j]:.3f}, r_pose={r_pose_per_joint[j]:.3f}")
 
-
     # -------- history 저장 --------
     if "_joint_tracking_history" in globals():
         globals()["_joint_tracking_history"].append(
             (step, q_star_next[0].cpu().numpy(), q[0].cpu().numpy())
+        )
+    if "_reward_history" in globals():
+        globals()["_reward_history"].append(
+            (step, r_pose_jointwise[0].detach().cpu().numpy())
         )
 
     # -------- episode 종료 시 시각화 --------
@@ -160,6 +161,9 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
         episode_steps = int(env.max_episode_length)
         if step > 0 and (step % episode_steps == episode_steps - 1):
             history = globals()["_joint_tracking_history"]
+            rewards = globals()["_reward_history"]
+
+            # ----- joint tracking -----
             save_dir = os.path.expanduser("~/nrs_lab2/outputs/png/")
             os.makedirs(save_dir, exist_ok=True)
             steps, targets, currents = zip(*history)
@@ -171,18 +175,42 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
                 plt.plot(targets[:,j],"--",color=colors[j],label=f"Target q{j+1}")
                 plt.plot(currents[:,j],"-",color=colors[j],label=f"Current q{j+1}")
             plt.legend(); plt.grid(True)
-            plt.title("Joint Tracking (v17)")
+            plt.title("Joint Tracking (v17-2)")
             plt.xlabel("Step"); plt.ylabel("Joint [rad]")
             plt.tight_layout()
             plt.savefig(os.path.join(save_dir,f"joint_tracking_v17_ep{_episode_counter+1}.png"))
             plt.close()
+
+            # ----- reward visualization -----
+            def smooth(y, window_size=50):
+                """1D moving average smoothing"""
+                if len(y) < window_size:
+                    return y
+                cumsum = np.cumsum(np.insert(y, 0, 0))
+                return (cumsum[window_size:] - cumsum[:-window_size]) / window_size
+
+            reward_dir = os.path.expanduser("~/nrs_lab2/outputs/rewards/")
+            os.makedirs(reward_dir, exist_ok=True)
+            r_steps, r_values = zip(*rewards)
+            r_values = np.vstack(r_values)
+            plt.figure(figsize=(10,6))
+            for j in range(r_values.shape[1]):
+                smooth_y = smooth(r_values[:, j], window_size=50)
+                smooth_x = np.linspace(r_steps[0], r_steps[-1], len(smooth_y))
+                plt.plot(smooth_x, smooth_y, color=colors[j], label=f"r_pose(q{j+1})")
+            plt.legend(); plt.grid(True)
+            plt.title("Per-Joint Pose Reward (Smoothed, v17-3)")
+            plt.xlabel("Step"); plt.ylabel("Reward value")
+            plt.tight_layout()
+            plt.savefig(os.path.join(reward_dir, f"r_pose_per_joint_ep{_episode_counter+1}.png"))
+            plt.close()
+
+            # 히스토리 초기화
             globals()["_joint_tracking_history"].clear()
+            globals()["_reward_history"].clear()
             globals()["_episode_counter"] += 1
 
     return total
-
-
-
 
 # --------------------------------
 # Reward improvement (meta reward)
