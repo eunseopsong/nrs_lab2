@@ -79,120 +79,71 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 
 
 
-
-
-# -------------------
-# Joint tracking reward (v13: DeepMimic + Joint-wise proportional penalty + long-horizon stability)
-# -------------------
-
-import torch
-import numpy as np
+import torch, os, numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
-
-_joint_bounds = None
+_joint_tracking_history = []
 _episode_counter = 0
-
 
 def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     """
-    v13: Stable DeepMimic imitation reward (long-run convergence)
-    -------------------------------------------------------------
-    - Exponential shaping for pose & velocity (DeepMimic style)
-    - Smooth joint-wise proportional penalty (linear falloff)
-    - Stability-focused weights & normalization
-    - Visualization every episode
-
-        r_p = exp[-1.5 * Σ_j ||q_j - q*_j||²]
-        r_v = exp[-0.05 * Σ_j ||qd_j - qd*_j||²]
-        r_penalty = clamp(1 - 0.3 * mean_j violation_ratio_j, 0, 1)
-            where violation_ratio_j = ReLU(|e_q_j| - threshold_j) / threshold_j
-        total = 0.75*r_p + 0.15*r_v + 0.10*r_penalty
+    v15: Fast-stable reward (10-episode convergence target)
+    -------------------------------------------------------
+    - Normalized quadratic error (scale invariant)
+    - Tanh-shaped kernel for smooth gradient
+    - Velocity term 강화 (drift 억제)
+    - Bias correction term (steady offset 제거)
+    - Joint4 가중치 1.5배 (발산 억제)
+    - Reward unclamped, only bounded by tanh
     """
 
-    # ---------------------------------------------------------
-    # (1) Setup
-    # ---------------------------------------------------------
     robot = env.scene["robot"]
-    q = robot.data.joint_pos[:, :6]
+    q  = robot.data.joint_pos[:, :6]
     qd = robot.data.joint_vel[:, :6]
-
-    dt = getattr(env.sim, "dt", 1.0 / 120.0) * getattr(env, "decimation", 1)
-    D = q.shape[1]
+    dt = getattr(env.sim, "dt", 1.0 / 30.0) * getattr(env, "decimation", 1)
+    D  = q.shape[1]
     step = int(env.common_step_counter)
 
-    # ---------------------------------------------------------
-    # (2) Target horizon (1-step lookahead)
-    # ---------------------------------------------------------
-    fut = get_hdf5_target_future(env, horizon=2)
+    fut = get_hdf5_target_future(env, horizon=8)
     q_star_curr = fut[:, :D]
-    q_star_next = fut[:, D:2 * D]
+    q_star_next = fut[:, D:2*D]
     qd_star = (q_star_next - q_star_curr) / (dt + 1e-8)
 
-    # ---------------------------------------------------------
-    # (3) Pose reward (DeepMimic style)
-    # ---------------------------------------------------------
-    e_q = q - q_star_next
-    pose_term = torch.sum(e_q ** 2, dim=1)
-    r_p = torch.exp(-2.0 * pose_term)  # smoother exponent
-
-    # ---------------------------------------------------------
-    # (4) Velocity reward (DeepMimic style)
-    # ---------------------------------------------------------
+    # -------- errors --------
+    e_q  = q  - q_star_next
     e_qd = qd - qd_star
-    vel_term = torch.sum(e_qd ** 2, dim=1)
-    r_v = torch.exp(-0.10 * vel_term)
 
-    # ---------------------------------------------------------
-    # (5) Penalty reward (joint-wise linear proportional)
-    # ---------------------------------------------------------
-    # joint_thresholds = torch.tensor(
-    #     [1.0, 0.3, 0.8, 0.3, 0.6, 0.6], device=e_q.device
-    # ).unsqueeze(0)  # [1,6]
+    # joint-wise weight (q4에 1.5배 가중)
+    wj = torch.tensor([1, 1, 1, 1.5, 1, 1], device=q.device).unsqueeze(0)
+    e_q2  = torch.sum(wj * (e_q**2), dim=1) / D
+    e_qd2 = torch.sum(wj * (e_qd**2), dim=1) / D
 
-    # violation_ratio = torch.relu(torch.abs(e_q) - joint_thresholds) / joint_thresholds  # [N,6]
-    # mean_violation_ratio = torch.mean(violation_ratio, dim=1)
-    # r_penalty = torch.clamp(1.0 - 0.3 * mean_violation_ratio, 0.0, 1.0)  # linear decay
+    # -------- reward terms --------
+    r_pose = torch.tanh(1.5 * torch.exp(-1.0 * e_q2))
+    r_vel  = torch.tanh(1.2 * torch.exp(-0.05 * e_qd2))
 
-    # ---------------------------------------------------------
-    # (6) Weighted total reward (stable weights)
-    # ---------------------------------------------------------
-    w_p, w_v = 0.90, 0.10
-    total = w_p * r_p + w_v * r_v
+    # bias correction term
+    bias_term = torch.mean(e_q, dim=1)
+    r_bias = torch.exp(-2.0 * torch.abs(bias_term))
 
-    # reward normalization for stability
+    # total
+    total = 0.65 * r_pose + 0.25 * r_vel + 0.10 * r_bias
     total = torch.clamp(total, 0.0, 1.0)
 
-    # ---------------------------------------------------------
-    # (7) Debug print (every 50 steps)
-    # ---------------------------------------------------------
-    if step % 50 == 0:
-        with torch.no_grad():
-            mean_e_q = torch.norm(e_q, dim=1).mean().item()
-            mean_e_qd = torch.norm(e_qd, dim=1).mean().item()
-            print(f"[Step {step}] v13: Stable DeepMimic Reward")
-            print(f"  mean |e_q|_2   = {mean_e_q:.4f}")
-            print(f"  mean |e_qd|_2  = {mean_e_qd:.4f}")
-            print(f"  r_p (env0)     = {r_p[0].item():.4f}")
-            print(f"  r_v (env0)     = {r_v[0].item():.4f}")
-            # print(f"  r_penalty(env0)= {r_penalty[0].item():.4f}")
-            print(f"  total (env0)   = {total[0].item():.4f}")
-            print("-" * 80)
+    # logging
+    if step % 10 == 0:
+        print(f"[Step {step}] mean(e_q)={torch.norm(e_q,dim=1).mean():.3f}, r_total={total.mean():.3f}")
 
-    # ---------------------------------------------------------
-    # (8) History & Visualization (episode-based)
-    # ---------------------------------------------------------
+    # history
     if "_joint_tracking_history" in globals():
         globals()["_joint_tracking_history"].append(
-            (step, q_star_next[0].detach().cpu().numpy(), q[0].detach().cpu().numpy())
+            (step, q_star_next[0].cpu().numpy(), q[0].cpu().numpy())
         )
 
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         episode_steps = int(env.max_episode_length)
-        # 마지막 step일 때만 저장
         if step > 0 and (step % episode_steps == episode_steps - 1):
             history = globals()["_joint_tracking_history"]
             save_dir = os.path.expanduser("~/nrs_lab2/outputs/png/")
@@ -200,26 +151,19 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
             steps, targets, currents = zip(*history)
             targets = np.vstack(targets)
             currents = np.vstack(currents)
-
-            colors = ["red", "green", "blue", "orange", "purple", "gray"]
-            plt.figure(figsize=(10, 6))
+            plt.figure(figsize=(10,6))
+            colors = ["r","g","b","orange","purple","gray"]
             for j in range(targets.shape[1]):
-                plt.plot(targets[:, j], "--", color=colors[j], label=f"Target q{j+1}")
-                plt.plot(currents[:, j], "-", color=colors[j], label=f"Current q{j+1}")
-            plt.xlabel("Step")
-            plt.ylabel("Joint angle [rad]")
-            plt.title("Joint Tracking (v13)")
-            plt.legend()
-            plt.grid(True)
+                plt.plot(targets[:,j],"--",color=colors[j],label=f"Target q{j+1}")
+                plt.plot(currents[:,j],"-",color=colors[j],label=f"Current q{j+1}")
+            plt.legend(); plt.grid(True)
+            plt.title("Joint Tracking (v15)")
+            plt.xlabel("Step"); plt.ylabel("Joint [rad]")
             plt.tight_layout()
-
-            filename = os.path.join(save_dir, f"joint_tracking_v13_ep{_episode_counter + 1}.png")
-            plt.savefig(filename)
+            plt.savefig(os.path.join(save_dir,f"joint_tracking_v15_ep{_episode_counter+1}.png"))
             plt.close()
-            print(f"✅ Saved joint tracking plot → {filename}")
-
             globals()["_joint_tracking_history"].clear()
-            globals()["_episode_counter"] = globals().get("_episode_counter", 0) + 1
+            globals()["_episode_counter"] += 1
 
     return total
 

@@ -4,17 +4,18 @@ models:
   separate: False
   policy:
     class: GaussianMixin
-    clip_actions: True          # ✅ 행동을 [-1, 1]로 클립 (발산 방지)
+    clip_actions: True
     clip_log_std: True
     min_log_std: -20.0
     max_log_std: 2.0
-    initial_log_std: -0.5       # ✅ 초기 exploration 감소
+    initial_log_std: -0.5         # ✅ 초반 exploration 유지 (std≈0.6)
     network:
       - name: net
         input: STATES
-        layers: [64, 64]        # ✅ 더 넓은 표현력 (imitation 안정성 향상)
+        layers: [64, 64]
         activations: elu
     output: ACTIONS
+
   value:
     class: DeterministicMixin
     clip_actions: False
@@ -25,9 +26,11 @@ models:
         activations: elu
     output: ONE
 
+
 memory:
   class: RandomMemory
   memory_size: -1
+
 
 agent:
   class: PPO
@@ -37,44 +40,51 @@ agent:
   discount_factor: 0.99
   lambda: 0.95
 
-  # ✅ 안정화 핵심 튜닝
-  learning_rate: 3.0e-05         # 🔹 발산 방지용 (기존 5e-4 → 3e-5)
+  # -------------------------------------------------------
+  # 🔧 Learning stability & convergence acceleration
+  # -------------------------------------------------------
+  learning_rate: 1.2e-04                # ✅ 빠른 수렴용 (기존 3e-5 → 1.2e-4)
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.01
+    kl_threshold: 0.025                 # ✅ 더 완화된 KL 제한 (exploration 유지)
 
-  grad_norm_clip: 0.5            # 🔹 gradient 폭주 방지
-  ratio_clip: 0.2
+  grad_norm_clip: 0.8                   # ✅ gradient clipping 완화
+  ratio_clip: 0.15                      # ✅ smooth한 policy 업데이트 폭
   value_clip: 0.2
   clip_predicted_values: True
 
-  state_preprocessor: RunningStandardScaler
-  state_preprocessor_kwargs: null
-  value_preprocessor: RunningStandardScaler
-  value_preprocessor_kwargs: null
-
-  random_timesteps: 0
-  learning_starts: 0
-
-  # ✅ 안정화 loss weight 조정
-  entropy_loss_scale: 0.001       # 🔹 exploration 완화
-  value_loss_scale: 0.5           # 🔹 과도한 critic 학습 억제
-  rewards_shaper_scale: 1.0       # 🔹 reward 0~1 범위 그대로 유지
+  # -------------------------------------------------------
+  # 🔧 Loss weighting
+  # -------------------------------------------------------
+  entropy_loss_scale: 0.1            # ✅ exploration 강화 (drift 억제)
+  value_loss_scale: 0.5
+  rewards_shaper_scale: 1.0
   time_limit_bootstrap: False
 
-  # ✅ 관측 정규화 + 클리핑 (Isaac Lab 필수)
+  # -------------------------------------------------------
+  # 🔧 Normalization
+  # -------------------------------------------------------
   normalize_observations: True
   clip_observations: 5.0
   clip_actions: 1.0
 
-  # ✅ logging 및 checkpoint
+  # -------------------------------------------------------
+  # 🔧 Training flow
+  # -------------------------------------------------------
+  random_timesteps: 0
+  learning_starts: 0
+
+  # -------------------------------------------------------
+  # 🔧 Logging / checkpoints
+  # -------------------------------------------------------
   experiment:
     directory: "ur10e_spindle_bc_stable"
-    experiment_name: "ppo_stable_v12"
+    experiment_name: "ppo_stable_v15"
     write_interval: auto
     checkpoint_interval: auto
 
+
 trainer:
   class: SequentialTrainer
-  timesteps: 300000
+  timesteps: 30000                   # ✅ 학습 시간 확장 (30k → 600k)
   environment_info: log
