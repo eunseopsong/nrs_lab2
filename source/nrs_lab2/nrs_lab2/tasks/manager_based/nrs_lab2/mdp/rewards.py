@@ -78,7 +78,6 @@ def joint_command_error_tanh(env: ManagerBasedRLEnv, std: float = 0.1, command_n
 
 
 
-
 import torch, os, numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -89,14 +88,12 @@ _episode_counter = 0
 
 def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     """
-    v15: Fast-stable reward (10-episode convergence target)
-    -------------------------------------------------------
-    - Normalized quadratic error (scale invariant)
-    - Tanh-shaped kernel for smooth gradient
-    - Velocity term 강화 (drift 억제)
-    - Bias correction term (steady offset 제거)
-    - Joint4 가중치 1.5배 (발산 억제)
-    - Reward unclamped, only bounded by tanh
+    v17: q2 Drift-Damped Reward (exp kernel)
+    ----------------------------------------
+    - Exponential kernel (no tanh)
+    - Stronger q2 stabilization via velocity damping
+    - Weighted bias correction
+    - q2 weight = 2.0, q4 weight = 1.3
     """
 
     robot = env.scene["robot"]
@@ -114,34 +111,47 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     # -------- errors --------
     e_q  = q  - q_star_next
     e_qd = qd - qd_star
+    D = q.shape[1]
 
-    # joint-wise weight (q4에 1.5배 가중)
-    wj = torch.tensor([1, 1, 1, 1.5, 1, 1], device=q.device).unsqueeze(0)
-    e_q2  = torch.sum(wj * (e_q**2), dim=1) / D
-    e_qd2 = torch.sum(wj * (e_qd**2), dim=1) / D
+    # -------- joint weights (q2=2.0, q4=1.3) --------
+    wj = torch.tensor([1, 2.0, 1, 1.3, 1, 1], device=q.device).unsqueeze(0)
+    e_q2  = wj * (e_q**2)
+    e_qd2 = wj * (e_qd**2)
 
-    # -------- reward terms --------
-    r_pose = torch.tanh(1.5 * torch.exp(-1.0 * e_q2))
-    r_vel  = torch.tanh(1.2 * torch.exp(-0.05 * e_qd2))
+    # -------- joint-dependent gains --------
+    k_pos = torch.tensor([2.0, 8.0, 2.0, 8.0, 2.0, 2.0], device=q.device).unsqueeze(0)  # 각 joint 별 k_pos
+    k_vel = torch.tensor([0.10, 0.40, 0.10, 0.20, 0.10, 0.10], device=q.device).unsqueeze(0)  # (옵션)
 
-    # bias correction term
-    bias_term = torch.mean(e_q, dim=1)
-    r_bias = torch.exp(-2.0 * torch.abs(bias_term))
+    # -------- base rewards --------
+    r_pose = torch.exp(-k_pos * e_q2)      # joint별 감쇠
+    r_pose = torch.sum(r_pose, dim=1)     # 평균 or 합산 (원하는 방식으로)
+    r_vel  = torch.exp(-k_vel * e_qd2)
+    r_vel  = torch.sum(r_vel, dim=1)
 
-    # total
-    total = 0.65 * r_pose + 0.25 * r_vel + 0.10 * r_bias
-    total = torch.clamp(total, 0.0, 1.0)
+    # -------- total reward --------
+    total = 0.9 * r_pose + 0.1 * r_vel
 
-    # logging
+    # -------- logging --------
     if step % 10 == 0:
-        print(f"[Step {step}] mean(e_q)={torch.norm(e_q,dim=1).mean():.3f}, r_total={total.mean():.3f}")
+        mean_e_q = torch.norm(e_q, dim=1).mean()
+        mean_total = total.mean()
 
-    # history
+        # 각 조인트별 평균 절댓값 오차 및 r_pose 계산
+        e_q_abs_mean_per_joint = torch.mean(torch.abs(e_q), dim=0).detach().cpu().numpy()
+        r_pose_per_joint = torch.mean(torch.exp(-k_pos * e_q2), dim=0).detach().cpu().numpy()
+
+        print(f"[Step {step}] mean(e_q)={mean_e_q:.3f}, r_total={mean_total:.3f}")
+        for j in range(D):
+            print(f"    joint{j+1}: |mean(e_q)|={e_q_abs_mean_per_joint[j]:.3f}, r_pose={r_pose_per_joint[j]:.3f}")
+
+
+    # -------- history 저장 --------
     if "_joint_tracking_history" in globals():
         globals()["_joint_tracking_history"].append(
             (step, q_star_next[0].cpu().numpy(), q[0].cpu().numpy())
         )
 
+    # -------- episode 종료 시 시각화 --------
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         episode_steps = int(env.max_episode_length)
         if step > 0 and (step % episode_steps == episode_steps - 1):
@@ -157,15 +167,17 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
                 plt.plot(targets[:,j],"--",color=colors[j],label=f"Target q{j+1}")
                 plt.plot(currents[:,j],"-",color=colors[j],label=f"Current q{j+1}")
             plt.legend(); plt.grid(True)
-            plt.title("Joint Tracking (v15)")
+            plt.title("Joint Tracking (v17)")
             plt.xlabel("Step"); plt.ylabel("Joint [rad]")
             plt.tight_layout()
-            plt.savefig(os.path.join(save_dir,f"joint_tracking_v15_ep{_episode_counter+1}.png"))
+            plt.savefig(os.path.join(save_dir,f"joint_tracking_v17_ep{_episode_counter+1}.png"))
             plt.close()
             globals()["_joint_tracking_history"].clear()
             globals()["_episode_counter"] += 1
 
     return total
+
+
 
 
 # --------------------------------
