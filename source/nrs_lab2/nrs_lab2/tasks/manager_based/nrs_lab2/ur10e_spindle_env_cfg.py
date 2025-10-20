@@ -81,16 +81,16 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=2500.0),
     )
-    # workpiece = AssetBaseCfg(
-    #     prim_path="{ENV_REGEX_NS}/Workpiece",
-    #     spawn=sim_utils.UsdFileCfg(
-    #         usd_path="/home/eunseop/isaac/isaac_save/concave_surface.usd",
-    #     ),
-    #     init_state=AssetBaseCfg.InitialStateCfg(
-    #         pos=(0.0, 0.0, 0.0),
-    #         rot=(1.0, 0.0, 0.0, 0.0),
-    #     ),
-    # )
+    workpiece = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Workpiece",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/eunseop/isaac/isaac_save/concave_surface.usd",
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+    )
 
     # Contact sensor (replicated per env)
     # contact_forces = ContactSensorCfg(
@@ -215,9 +215,6 @@ class RewardsCfg:
         func=local_rewards.joint_tracking_reward,  # 동일 함수명 (v1 내부 구현)
         weight=1.0,
     )
-
-
-
 
     # (2) Contact stability reward
     # contact_force_reward = RewTerm(
