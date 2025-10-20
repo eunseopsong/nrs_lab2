@@ -114,15 +114,15 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     D = q.shape[1]
 
     # -------- joint weights (q2=2.0, q4=1.3) --------
-    wj = torch.tensor([1, 2.0, 1, 1.3, 1, 1], device=q.device).unsqueeze(0)
+    wj = torch.tensor([1, 2.0, 1, 2.0, 1, 1], device=q.device).unsqueeze(0)
     e_q2  = wj * (e_q**2)
     e_qd2 = wj * (e_qd**2)
 
     # -------- joint-dependent gains --------
-    k_pos = torch.tensor([1.0, 8.0, 2.0, 8.0, 1.0, 2.0], device=q.device).unsqueeze(0)  # 각 joint 별 k_pos
-    k_vel = torch.tensor([0.10, 0.40, 0.10, 0.20, 0.10, 0.10], device=q.device).unsqueeze(0)  # (옵션)
-    # v18
-    
+    k_pos = torch.tensor([1.0, 8.0, 2.0, 8.0, 2.0, 2.0], device=q.device).unsqueeze(0)  # 각 joint 별 k_pos
+    k_vel = torch.tensor([0.10, 0.40, 0.10, 0.40, 0.10, 0.10], device=q.device).unsqueeze(0)  # (옵션)
+    # v19
+
 
 
 

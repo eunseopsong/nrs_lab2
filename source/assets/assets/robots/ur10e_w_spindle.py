@@ -50,7 +50,7 @@ UR10E_HOME_DICT = {
     "shoulder_pan_joint": 0.673993,
     "shoulder_lift_joint": -1.266343,
     "elbow_joint": -2.472206,
-    "wrist_1_joint": -1.060399,
+    "wrist_1_joint": -1.260399,
     "wrist_2_joint": 1.479353,
     "wrist_3_joint": 1.324695,
 }
