@@ -55,6 +55,9 @@ UR10E_HOME_DICT = {
     "wrist_3_joint": 1.324695,
 }
 
+
+
+
 # Actuator joint list (exact names expected in the USD)
 UR10E_ARM_JOINTS = [
     "shoulder_pan_joint",
