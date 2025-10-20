@@ -121,6 +121,10 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     # -------- joint-dependent gains --------
     k_pos = torch.tensor([1.0, 8.0, 2.0, 8.0, 1.0, 2.0], device=q.device).unsqueeze(0)  # 각 joint 별 k_pos
     k_vel = torch.tensor([0.10, 0.40, 0.10, 0.20, 0.10, 0.10], device=q.device).unsqueeze(0)  # (옵션)
+    # v18
+    
+
+
 
     # -------- base rewards --------
     r_pose = torch.exp(-k_pos * e_q2)      # joint별 감쇠
