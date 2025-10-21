@@ -2,7 +2,8 @@
 """
 Observation utilities for UR10e spindle environment.
 - Integrated with nrs_ik_core (C++ FK module)
-- Separate loaders for joint and position HDF5 datasets
+- Horizon-based trajectory loaders (joints / positions)
+- Includes EE pose (x, y, z, roll, pitch, yaw), contact, and camera sensors
 """
 
 import torch
@@ -16,6 +17,60 @@ from nrs_ik_core import IKSolver  # ✅ pybind11 기반 C++ 모듈
 _hdf5_joints = None
 _hdf5_positions = None
 _step_idx = 0
+
+
+# ------------------------------------------------------
+# Quaternion → Euler XYZ 변환 (roll, pitch, yaw)
+# ------------------------------------------------------
+def quat_to_euler_xyz(quat: torch.Tensor) -> torch.Tensor:
+    """
+    Convert quaternion (x, y, z, w) → Euler angles (roll, pitch, yaw)
+    - Input: (N, 4)
+    - Output: (N, 3)
+    """
+    x, y, z, w = quat.unbind(-1)
+
+    t0 = 2.0 * (w * x + y * z)
+    t1 = 1.0 - 2.0 * (x * x + y * y)
+    roll = torch.atan2(t0, t1)
+
+    t2 = 2.0 * (w * y - z * x)
+    t2 = torch.clamp(t2, -1.0, 1.0)
+    pitch = torch.asin(t2)
+
+    t3 = 2.0 * (w * z + x * y)
+    t4 = 1.0 - 2.0 * (y * y + z * z)
+    yaw = torch.atan2(t3, t4)
+
+    return torch.stack((roll, pitch, yaw), dim=-1)
+
+
+# ------------------------------------------------------
+# ✅ EE pose observation (x, y, z, roll, pitch, yaw)
+# ------------------------------------------------------
+def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot", frame_name: str = "wrist_3_link"):
+    """Returns end-effector pose (x, y, z, roll, pitch, yaw)."""
+    robot = env.scene[asset_name]
+    link_indices = robot.find_bodies(frame_name)
+    if len(link_indices) == 0:
+        raise ValueError(f"[ERROR] Link '{frame_name}' not found in robot asset.")
+    idx = link_indices[0]
+
+    ee_pos = robot.data.body_pos_w[:, idx, :]    # (num_envs, 3)
+    ee_quat = robot.data.body_quat_w[:, idx, :]  # (num_envs, 4)
+    ee_rpy = quat_to_euler_xyz(ee_quat)          # (num_envs, 3)
+
+    # ✅ 강제로 (num_envs, 6) 형태 보장
+    ee_pose = torch.cat([ee_pos, ee_rpy], dim=-1)
+    if ee_pose.ndim == 3:
+        ee_pose = ee_pose.squeeze(1)
+    elif ee_pose.ndim == 1:
+        ee_pose = ee_pose.unsqueeze(0)
+    assert ee_pose.ndim == 2 and ee_pose.shape[1] == 6, f"[EE_POSE] Invalid shape: {ee_pose.shape}"
+
+    return ee_pose
+
+
 
 
 # ------------------------------------------------------
@@ -70,20 +125,19 @@ def get_hdf5_target_joints(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Te
     idx = min(int(step / E * T), T - 1)
     future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
 
-    # ✅ flatten (horizon, D) → (1, horizon * D)
+    # flatten (horizon, D) → (1, horizon * D)
     future_targets = _hdf5_joints[future_idx].reshape(1, horizon * D)
     return future_targets.repeat(env.num_envs, 1)
-
 
 
 # ------------------------------------------------------
 # Observation: target positions (horizon-based)
 # ------------------------------------------------------
 def get_hdf5_target_positions(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
-    """현재 step 기준 horizon 길이만큼 position target 반환"""
+    """현재 step 기준 horizon 길이만큼 position target 반환 (x, y, z, r, p, y 포함)"""
     global _hdf5_positions
     if _hdf5_positions is None:
-        D = 6  # position (x,y,z,roll,pitch,yaw) 기준
+        D = 6  # position (x,y,z,roll,pitch,yaw)
         return torch.zeros((env.num_envs, horizon * D), device=env.device, dtype=torch.float32)
 
     T, D = _hdf5_positions.shape
@@ -92,10 +146,9 @@ def get_hdf5_target_positions(env: ManagerBasedRLEnv, horizon: int = 5) -> torch
     idx = min(int(step / E * T), T - 1)
     future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
 
-    # ✅ flatten (horizon, D) → (1, horizon * D)
+    # flatten (horizon, D) → (1, horizon * D)
     future_targets = _hdf5_positions[future_idx].reshape(1, horizon * D)
     return future_targets.repeat(env.num_envs, 1)
-
 
 
 # ------------------------------------------------------
@@ -118,7 +171,7 @@ def get_contact_forces(env, sensor_name="contact_forces"):
 
 
 # ------------------------------------------------------
-# Camera distance & normals
+# ✅ Camera distance & normals
 # ------------------------------------------------------
 def get_camera_distance(env, sensor_name="camera", debug_interval: int = 100):
     """Compute mean camera depth (distance-to-image-plane)."""

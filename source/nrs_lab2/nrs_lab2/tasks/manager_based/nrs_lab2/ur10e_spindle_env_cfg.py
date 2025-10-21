@@ -102,8 +102,8 @@ class ObservationsCfg:
         actions = ObsTerm(func=mdp.last_action)
 
         # ✅ EE position (현재 엔드이펙터 위치)
-        ee_pos = ObsTerm(
-            func=mdp.get_ee_pos,
+        ee_pose = ObsTerm(
+            func=local_obs.get_ee_pose,
             params={"asset_name": "robot", "frame_name": "wrist_3_link"},
         )
 
@@ -119,9 +119,10 @@ class ObservationsCfg:
 
         def __post_init__(self):
             self.enable_corruption = True
-            self.concatenate_terms = True  # 모든 항목을 하나의 observation vector로 결합
+            self.concatenate_terms = True  # ✅ 추가됨: dict → tensor 자동 병합
 
     policy: PolicyCfg = PolicyCfg()
+
 
 # -----------------------------------------------------------------------------
 # Events
