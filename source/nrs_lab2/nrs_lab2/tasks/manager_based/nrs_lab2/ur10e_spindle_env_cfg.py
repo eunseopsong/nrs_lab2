@@ -65,6 +65,9 @@ local_rewards = importlib.import_module(
 # Robot and sensor assets
 from assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
 
+# pybind
+from nrs_lab2.src.nrs_ik_py_bind import nrs_ik_py as nrs_ik
+
 # -----------------------------------------------------------------------------
 # Scene Configuration
 # -----------------------------------------------------------------------------
@@ -151,6 +154,8 @@ class ObservationsCfg:
             noise=Unoise(n_min=-0.01, n_max=0.01),
         )
         actions = ObsTerm(func=mdp.last_action)
+
+        # ee_state = ObsTerm(func=local_obs.get_ee_observation)   # ✅ 추가
 
         # HDF5 기반 target 예측 (trajectory 기반)
         target_future = ObsTerm(
