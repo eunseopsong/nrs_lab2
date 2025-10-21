@@ -5,6 +5,7 @@ Observation utilities for UR10e spindle environment.
 
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
+from nrs_lab2.src.nrs_ik_py_bind import nrs_ik_py as nrs_ik   # ✅ IK 모듈 import
 
 # ------------------------------------------------------
 # Global buffers
@@ -44,8 +45,8 @@ def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
     E = env.max_episode_length
     step = env.episode_length_buf[0].item()
     idx = min(int(step / E * T), T - 1)
-
     return _hdf5_trajectory[idx]
+
 
 # ------------------------------------------------------
 # Observation: future target joints
@@ -64,77 +65,105 @@ def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Te
 
     # horizon 만큼 future target 뽑기
     future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
-
-    # shape (horizon, D) → (1, horizon * D) → (num_envs, horizon * D)
     future_targets = _hdf5_trajectory[future_idx].reshape(1, horizon * D)
     return future_targets.repeat(env.num_envs, 1)
+
+
+# ------------------------------------------------------
+# ✅ Observation: End-Effector Position / Velocity (using nrs_ik)
+# ------------------------------------------------------
+def get_ee_observation(env: ManagerBasedRLEnv, tool_z: float = 0.239, use_degrees: bool = False):
+    """
+    Compute End-Effector position and velocity for each env using nrs_ik_py.
+
+    Returns:
+        (num_envs, 6) tensor = [x, y, z, vx, vy, vz]
+    """
+    robot = env.scene["robot"]
+    q = robot.data.joint_pos
+    qd = robot.data.joint_vel
+    num_envs, n_dof = q.shape
+
+    solver = nrs_ik.IKSolver(tool_z, use_degrees)
+    ee_pos = torch.zeros((num_envs, 3), device=q.device)
+    ee_vel = torch.zeros((num_envs, 3), device=q.device)
+
+    for i in range(num_envs):
+        # --- Forward kinematics (pose)
+        ok, pose = solver.forward(q[i].tolist())
+        if ok:
+            ee_pos[i] = torch.tensor(pose[:3], dtype=torch.float32, device=q.device)
+
+        # --- Linear velocity (Jacobian * qdot)
+        try:
+            J = solver.get_jacobian(q[i].tolist())   # shape (6, 6)
+            J = torch.tensor(J, dtype=torch.float32, device=q.device)
+            v = J @ qd[i]
+            ee_vel[i] = v[:3]
+        except AttributeError:
+            # Jacobian 미구현 시 0으로 반환
+            ee_vel[i] = torch.zeros(3, device=q.device)
+
+    # --- Debug print
+    if env.common_step_counter % 100 == 0:
+        x, y, z = ee_pos[0].tolist()
+        vx, vy, vz = ee_vel[0].tolist()
+        print(f"[EE DEBUG] step={env.common_step_counter} pos=({x:.3f},{y:.3f},{z:.3f}), vel=({vx:.3f},{vy:.3f},{vz:.3f})")
+
+    return torch.cat([ee_pos, ee_vel], dim=-1)  # (num_envs, 6)
+
 
 # ------------------------------------------------------
 # ✅ Observation: Contact Sensor Forces
 # ------------------------------------------------------
-
 def get_contact_forces(env, sensor_name="contact_forces"):
     """
     Returns mean contact wrench [Fx, Fy, Fz, 0, 0, 0] for debugging and RL observation.
     """
     sensor = env.scene.sensors[sensor_name]
     data = sensor.data
-
-    # World-frame contact forces: (num_envs, num_bodies, 3)
     forces_w = data.net_forces_w
     mean_force = torch.mean(forces_w, dim=1)  # (num_envs, 3)
     zeros_torque = torch.zeros_like(mean_force)
-    contact_wrench = torch.cat([mean_force, zeros_torque], dim=-1)  # (num_envs, 6)
+    contact_wrench = torch.cat([mean_force, zeros_torque], dim=-1)
 
-    # ✅ Debug print every few steps (optional)
     step = int(env.common_step_counter)
-    if step % 100 == 0:  # every 100 steps
+    if step % 100 == 0:
         fx, fy, fz = mean_force[0].tolist()
         print(f"[ContactSensor DEBUG] Step {step}: Fx={fx:.3f}, Fy={fy:.3f}, Fz={fz:.3f}")
 
     return contact_wrench
 
+
 # ============================================================
 # Camera distance observation (with debug)
 # ============================================================
-
 def get_camera_distance(env, sensor_name="camera", debug_interval: int = 100) -> torch.Tensor:
     """
     Retrieve depth (distance-to-image-plane) data from a camera sensor.
     Returns: (num_envs, 1) tensor of mean distances [m]
     """
-    # 1️⃣ 카메라 센서 객체 가져오기
     if sensor_name not in env.scene.sensors:
         raise KeyError(f"[ERROR] Camera sensor '{sensor_name}' not found in scene.sensors.")
 
     sensor = env.scene.sensors[sensor_name]
-
-    # 2️⃣ 카메라 출력 텐서 접근
     data = sensor.data.output.get("distance_to_image_plane", None)
     if data is None:
         raise RuntimeError("[ERROR] Camera data output 'distance_to_image_plane' is missing.")
 
-    # 3️⃣ 유효한 픽셀만 추출
     valid_mask = torch.isfinite(data) & (data > 0)
     valid_data = torch.where(valid_mask, data, torch.nan)
-
-    # 4️⃣ 환경별 평균 거리 계산 (NaN 무시)
     mean_distance = torch.nanmean(valid_data.view(valid_data.shape[0], -1), dim=1)
-    mean_distance = mean_distance.unsqueeze(1)  # shape: (num_envs, 1)
+    mean_distance = mean_distance.unsqueeze(1)
 
-    # 5️⃣ 디버깅 (주기적 출력)
     if env.common_step_counter % debug_interval == 0:
         md_cpu = mean_distance[0].detach().cpu().item()
         print(f"[Step {env.common_step_counter}] Mean camera distance: {md_cpu:.4f} m")
 
-        # (선택) 특정 프레임 저장
         if env.common_step_counter % (debug_interval * 10) == 0:
-            import matplotlib.pyplot as plt
-            import os
+            import matplotlib.pyplot as plt, os
             save_dir = os.path.expanduser("~/nrs_lab2/outputs/camera")
             os.makedirs(save_dir, exist_ok=True)
-
-            # depth 이미지 저장
             depth_img = data[0].detach().cpu().numpy()
             plt.imshow(depth_img, cmap="plasma")
             plt.colorbar(label="Distance [m]")
@@ -146,6 +175,7 @@ def get_camera_distance(env, sensor_name="camera", debug_interval: int = 100) ->
 
     return mean_distance
 
+
 def get_camera_normals(env, sensor_name="camera"):
     """
     Retrieve mean surface normal (x, y, z) from the camera sensor.
@@ -155,8 +185,7 @@ def get_camera_normals(env, sensor_name="camera"):
     if normals is None:
         return torch.zeros((env.num_envs, 3), device=env.device)
 
-    # (H, W, 3) → (3,)
-    normals_mean = normals.mean(dim=(1, 2))  # 전체 이미지 평균 법선
+    normals_mean = normals.mean(dim=(1, 2))
     if env.common_step_counter % 100 == 0:
         print(f"[Camera DEBUG] Step {env.common_step_counter}: Mean surface normal = {normals_mean[0].cpu().numpy()}")
 
