@@ -1,220 +1,160 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-v20.1: q2 Drift-Damped Reward (exp kernel + total reward visualization)
------------------------------------------------------------------------
-- **Reward Type:** Exponential kernel (no tanh)
-- **Goal:** 강화된 q2 안정화 및 velocity damping 적용
-- **Bias Correction:** Weighted bias 적용
-- **Joint Weights (wj):** [1.0, 2.0, 1.0, 4.0, 1.0, 1.0]
-- **k_pos:** [1.0, 8.0, 2.0, 6.0, 2.0, 2.0]
-- **k_vel:** [0.10, 0.40, 0.10, 0.40, 0.10, 0.10]
-- **Home Pose (UR10E_HOME_DICT):**
-    shoulder_pan_joint :  0.673993
-    shoulder_lift_joint : -1.266343
-    elbow_joint         : -2.472206
-    wrist_1_joint       : -1.160399
-    wrist_2_joint       :  1.479353
-    wrist_3_joint       :  1.324695
-- 각 episode 종료 시:
-    (1) Joint Tracking Plot 저장 → ~/nrs_lab2/outputs/png/
-    (2) Reward per Joint + Total Reward Plot 저장 → ~/nrs_lab2/outputs/rewards/
+Observation utilities for UR10e spindle environment.
+- Integrated with nrs_ik_core (C++ FK module)
+- Separate loaders for joint and position HDF5 datasets
 """
 
-from __future__ import annotations
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from isaaclab.envs import ManagerBasedRLEnv
+import torch
+from isaaclab.envs import ManagerBasedRLEnv
+from nrs_ik_core import IKSolver  # ✅ pybind11 기반 C++ 모듈
 
-import torch, os, numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import get_hdf5_target_future
-
-# -----------------------------------------------------------
-# Global States
-# -----------------------------------------------------------
-_joint_tracking_history = []
-_reward_history = []
-_episode_counter = 0
+# ------------------------------------------------------
+# Global buffers
+# ------------------------------------------------------
+_hdf5_joints = None
+_hdf5_positions = None
+_step_idx = 0
 
 
-# -----------------------------------------------------------
-# Joint Tracking Reward (v20.1)
-# -----------------------------------------------------------
-def joint_tracking_reward(env: "ManagerBasedRLEnv"):
+# ------------------------------------------------------
+# HDF5 loader: Joints
+# ------------------------------------------------------
+def load_hdf5_joints(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "target_joints"):
+    """HDF5 trajectory (joint targets) 데이터를 로드"""
+    global _hdf5_joints, _step_idx
+    import h5py
 
-    robot = env.scene["robot"]
-    q  = robot.data.joint_pos[:, :6]
-    qd = robot.data.joint_vel[:, :6]
-    dt = getattr(env.sim, "dt", 1.0 / 30.0) * getattr(env, "decimation", 1)
-    D  = q.shape[1]
-    step = int(env.common_step_counter)
+    with h5py.File(file_path, "r") as f:
+        if dataset_key not in f:
+            raise KeyError(f"[ERROR] HDF5 (joints): '{dataset_key}' not found. Available keys: {list(f.keys())}")
+        data = f[dataset_key][:]  # shape [T, D]
 
-    # ✅ 여기 수정
-    fut = get_hdf5_target_future(env, horizon=8)
-    q_star_curr = fut[:, :D]
-    q_star_next = fut[:, D:2*D]
-    qd_star = (q_star_next - q_star_curr) / (dt + 1e-8)
-
-    # 이하 동일 (reward 계산 및 시각화 등)
+    _hdf5_joints = torch.tensor(data, dtype=torch.float32, device=env.device)
+    _step_idx = 0
+    print(f"[INFO] Loaded HDF5 joints of shape {_hdf5_joints.shape} from {file_path}")
 
 
-    # -------- errors --------
-    e_q, e_qd = q - q_star_next, qd - qd_star
+# ------------------------------------------------------
+# HDF5 loader: Positions
+# ------------------------------------------------------
+def load_hdf5_positions(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "target_positions"):
+    """HDF5 trajectory (position targets) 데이터를 로드"""
+    global _hdf5_positions, _step_idx
+    import h5py
 
-    # -------- weights & gains --------
-    wj = torch.tensor([1, 2.0, 1, 4.0, 1, 1], device=q.device).unsqueeze(0)
-    k_pos = torch.tensor([1.0, 8.0, 2.0, 6.0, 2.0, 2.0], device=q.device).unsqueeze(0)
-    k_vel = torch.tensor([0.10, 0.40, 0.10, 0.40, 0.10, 0.10], device=q.device).unsqueeze(0)
+    with h5py.File(file_path, "r") as f:
+        if dataset_key not in f:
+            raise KeyError(f"[ERROR] HDF5 (positions): '{dataset_key}' not found. Available keys: {list(f.keys())}")
+        data = f[dataset_key][:]  # shape [T, D]
 
-    e_q2, e_qd2 = wj * (e_q ** 2), wj * (e_qd ** 2)
-
-    # -------- rewards --------
-    r_pose_jointwise = torch.exp(-k_pos * e_q2)
-    r_vel_jointwise  = torch.exp(-k_vel * e_qd2)
-    r_pose, r_vel = r_pose_jointwise.sum(dim=1), r_vel_jointwise.sum(dim=1)
-    total = 0.9 * r_pose + 0.1 * r_vel
-
-    # -------- console log every 10 steps --------
-    if step % 10 == 0:
-        print(f"[Step {step}] mean(e_q)={torch.norm(e_q, dim=1).mean():.3f}, total={total.mean():.3f}")
-        mean_e_q_abs = torch.mean(torch.abs(e_q), dim=0).cpu().numpy()
-        mean_r_pose = torch.mean(r_pose_jointwise, dim=0).cpu().numpy()
-        for j in range(D):
-            print(f"  joint{j+1}: |mean(e_q)|={mean_e_q_abs[j]:.3f}, r_pose={mean_r_pose[j]:.3f}")
-
-    # -------- history 저장 --------
-    _joint_tracking_history.append((step, q_star_next[0].cpu().numpy(), q[0].cpu().numpy()))
-    _reward_history.append((step, r_pose_jointwise[0].cpu().numpy()))
-
-    # -------- episode 종료 시 시각화 --------
-    if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
-        episode_steps = int(env.max_episode_length)
-        if step > 0 and (step % episode_steps == episode_steps - 1):
-            save_episode_plots(step)
-
-    return total
+    _hdf5_positions = torch.tensor(data, dtype=torch.float32, device=env.device)
+    _step_idx = 0
+    print(f"[INFO] Loaded HDF5 positions of shape {_hdf5_positions.shape} from {file_path}")
 
 
-# -----------------------------------------------------------
-# Visualization (Joint Tracking + Reward)
-# -----------------------------------------------------------
-def save_episode_plots(step: int):
-    """각 episode 종료 시 joint tracking 및 reward 시각화"""
-    global _joint_tracking_history, _reward_history, _episode_counter
+# ------------------------------------------------------
+# Observation: current target joints
+# ------------------------------------------------------
+def get_hdf5_target_joints(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """현재 step에 해당하는 target joint 반환"""
+    global _hdf5_joints
+    if _hdf5_joints is None:
+        raise RuntimeError("HDF5 joints not loaded. Did you register load_hdf5_joints()?")
 
-    save_dir = os.path.expanduser("~/nrs_lab2/outputs/png/")
-    reward_dir = os.path.expanduser("~/nrs_lab2/outputs/rewards/")
-    os.makedirs(save_dir, exist_ok=True)
-    os.makedirs(reward_dir, exist_ok=True)
-
-    # -------------------------------
-    # (1) Joint Tracking Plot
-    # -------------------------------
-    steps, targets, currents = zip(*_joint_tracking_history)
-    targets, currents = np.vstack(targets), np.vstack(currents)
-    colors = ["r","g","b","orange","purple","gray"]
-
-    plt.figure(figsize=(10,6))
-    for j in range(targets.shape[1]):
-        plt.plot(targets[:,j],"--",color=colors[j],label=f"Target q{j+1}")
-        plt.plot(currents[:,j],"-",color=colors[j],label=f"Current q{j+1}")
-    plt.legend(); plt.grid(True)
-    plt.title(f"Joint Tracking (v20.1)")
-    plt.xlabel("Step"); plt.ylabel("Joint [rad]")
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"joint_tracking_v20_ep{_episode_counter+1}.png"))
-    plt.close()
-
-    # -------------------------------
-    # (2) Reward Visualization (per joint + total)
-    # -------------------------------
-    def smooth(y, window=50):
-        if len(y) < window:
-            return y
-        cumsum = np.cumsum(np.insert(y, 0, 0))
-        return (cumsum[window:] - cumsum[:-window]) / window
-
-    r_steps, r_values = zip(*_reward_history)
-    r_values = np.vstack(r_values)                # shape: [T, 6]
-    total_reward = np.sum(r_values, axis=1)       # shape: [T,]
-    smooth_window = 50
-
-    plt.figure(figsize=(10,6))
-    for j in range(r_values.shape[1]):
-        smooth_y = smooth(r_values[:, j], smooth_window)
-        smooth_x = np.linspace(r_steps[0], r_steps[-1], len(smooth_y))
-        plt.plot(smooth_x, smooth_y, color=colors[j], label=f"r_pose(q{j+1})")
-
-    # ----- total reward (black thick line) -----
-    smooth_total = smooth(total_reward, smooth_window)
-    smooth_x_total = np.linspace(r_steps[0], r_steps[-1], len(smooth_total))
-    plt.plot(smooth_x_total, smooth_total, color="black", linewidth=2.5, label="Total Reward")
-
-    plt.legend(); plt.grid(True)
-    plt.title("Per-Joint Pose Reward + Total Reward (Smoothed, v20.1)")
-    plt.xlabel("Step"); plt.ylabel("Reward value")
-    plt.tight_layout()
-    plt.savefig(os.path.join(reward_dir, f"r_pose_total_v20_ep{_episode_counter+1}.png"))
-    plt.close()
-
-    # -------------------------------
-    # (3) Cleanup
-    # -------------------------------
-    _joint_tracking_history.clear()
-    _reward_history.clear()
-    _episode_counter += 1
+    T = _hdf5_joints.shape[0]
+    E = env.max_episode_length
+    step = env.episode_length_buf[0].item()
+    idx = min(int(step / E * T), T - 1)
+    return _hdf5_joints[idx]
 
 
-# -----------------------------------------------------------
-# Contact Force Reward
-# -----------------------------------------------------------
-def contact_force_reward(env: ManagerBasedRLEnv,
-                         sensor_name="contact_forces",
-                         fz_min=5.0, fz_max=15.0,
-                         margin=2.0, weight=1.0):
+# ------------------------------------------------------
+# Observation: current target positions
+# ------------------------------------------------------
+def get_hdf5_target_positions(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """현재 step에 해당하는 target position 반환"""
+    global _hdf5_positions
+    if _hdf5_positions is None:
+        raise RuntimeError("HDF5 positions not loaded. Did you register load_hdf5_positions()?")
+
+    T = _hdf5_positions.shape[0]
+    E = env.max_episode_length
+    step = env.episode_length_buf[0].item()
+    idx = min(int(step / E * T), T - 1)
+    return _hdf5_positions[idx]
+
+
+# ------------------------------------------------------
+# Observation: future target joints
+# ------------------------------------------------------
+def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
+    """horizon 길이의 미래 joint trajectory 반환"""
+    global _hdf5_joints
+    if _hdf5_joints is None:
+        D = env.scene["robot"].num_joints
+        return torch.zeros((env.num_envs, horizon * D), device=env.device, dtype=torch.float32)
+
+    T, D = _hdf5_joints.shape
+    step = env.episode_length_buf[0].item()
+    E = env.max_episode_length
+    idx = min(int(step / E * T), T - 1)
+
+    # horizon 만큼 미래 joint target 추출
+    future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
+    future_targets = _hdf5_joints[future_idx].reshape(1, horizon * D)
+    return future_targets.repeat(env.num_envs, 1)
+
+
+# ------------------------------------------------------
+# ✅ Observation: Contact Sensor Forces
+# ------------------------------------------------------
+def get_contact_forces(env, sensor_name="contact_forces"):
+    """Mean contact wrench [Fx, Fy, Fz, 0, 0, 0]"""
     sensor = env.scene.sensors[sensor_name]
-    forces_w = sensor.data.net_forces_w  # (num_envs, num_bodies, 3)
-    fz = torch.mean(forces_w, dim=1)[:, 2]  # 평균 Fz
+    forces_w = sensor.data.net_forces_w
+    mean_force = torch.mean(forces_w, dim=1)
+    zeros_torque = torch.zeros_like(mean_force)
+    contact_wrench = torch.cat([mean_force, zeros_torque], dim=-1)
 
-    lower_smooth = torch.tanh((fz - fz_min) / margin)
-    upper_smooth = torch.tanh((fz_max - fz) / margin)
-    reward = weight * torch.clamp(0.5 * (lower_smooth + upper_smooth), 0.0, 1.0)
+    step = int(env.common_step_counter)
+    if step % 100 == 0:
+        fx, fy, fz = mean_force[0].tolist()
+        print(f"[ContactSensor DEBUG] Step {step}: Fx={fx:.3f}, Fy={fy:.3f}, Fz={fz:.3f}")
 
-    if env.common_step_counter % 1000 == 0:
-        print(f"[ContactReward] Step {env.common_step_counter}: Fz={fz[0]:.3f}, Reward={reward[0]:.3f}")
-    return reward
+    return contact_wrench
 
 
-# -----------------------------------------------------------
-# Camera Distance Reward
-# -----------------------------------------------------------
-def camera_distance_reward(env, target_distance=0.185, sigma=0.02):
-    camera_data = env.scene["camera"].data.output["distance_to_image_plane"]
-    d_mean = torch.mean(camera_data.view(env.num_envs, -1), dim=1)
-    error = torch.abs(d_mean - target_distance)
-    reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
+# ------------------------------------------------------
+# Camera distance & normals
+# ------------------------------------------------------
+def get_camera_distance(env, sensor_name="camera", debug_interval: int = 100):
+    """Compute mean camera depth (distance-to-image-plane)."""
+    if sensor_name not in env.scene.sensors:
+        raise KeyError(f"[ERROR] Camera sensor '{sensor_name}' not found in scene.sensors.")
+    sensor = env.scene.sensors[sensor_name]
+    data = sensor.data.output.get("distance_to_image_plane", None)
+    if data is None:
+        raise RuntimeError("[ERROR] Missing 'distance_to_image_plane' in camera data output.")
+    valid_mask = torch.isfinite(data) & (data > 0)
+    valid_data = torch.where(valid_mask, data, torch.nan)
+    mean_distance = torch.nanmean(valid_data.view(valid_data.shape[0], -1), dim=1).unsqueeze(1)
 
+    if env.common_step_counter % debug_interval == 0:
+        md_cpu = mean_distance[0].detach().cpu().item()
+        print(f"[Step {env.common_step_counter}] Mean camera distance: {md_cpu:.4f} m")
+
+    return mean_distance
+
+
+def get_camera_normals(env, sensor_name="camera"):
+    """Compute mean surface normal (x, y, z) from the camera."""
+    cam_sensor = env.scene.sensors[sensor_name]
+    normals = cam_sensor.data.output.get("normals", None)
+    if normals is None:
+        return torch.zeros((env.num_envs, 3), device=env.device)
+
+    normals_mean = normals.mean(dim=(1, 2))
     if env.common_step_counter % 100 == 0:
-        print(f"[CameraReward] Step {env.common_step_counter}: mean={d_mean[0]:.4f}, reward={reward[0]:.4f}")
-        save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
-        os.makedirs(save_dir, exist_ok=True)
-        with open(os.path.join(save_dir, f"camera_distance_step{env.common_step_counter}.txt"), "w") as f:
-            f.write(f"Step {env.common_step_counter}, mean_dist={d_mean[0]:.6f}, reward={reward[0]:.6f}\n")
-
-    return reward
-
-
-# -----------------------------------------------------------
-# Termination Condition
-# -----------------------------------------------------------
-def reached_end(env: ManagerBasedRLEnv, command_name=None, asset_cfg=None) -> torch.Tensor:
-    from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import _hdf5_trajectory
-    if _hdf5_trajectory is None:
-        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-
-    T = _hdf5_trajectory.shape[0]
-    return torch.tensor(env.common_step_counter >= (T - 1),
-                        dtype=torch.bool, device=env.device).repeat(env.num_envs)
+        print(f"[Camera DEBUG] Step {env.common_step_counter}: Mean surface normal = {normals_mean[0].cpu().numpy()}")
+    return normals_mean
