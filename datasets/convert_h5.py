@@ -35,7 +35,7 @@ def txt_to_hdf5(txt_path, h5_path, dataset_key="joint_positions", num_joints=6):
     print(f"Converted dataset saved to {h5_path} with key '{dataset_key}'.")
 
 if __name__ == "__main__":
-    txt_file = "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.txt"
-    h5_file = "/home/eunseop/nrs_lab2/datasets/joint_recording.h5"
+    txt_file = "/home/eunseop/nrs_lab2/datasets/hand_g_recording.txt"
+    h5_file = "/home/eunseop/nrs_lab2/datasets/hand_g_recording.h5"
     txt_to_hdf5(txt_file, h5_file, dataset_key="joint_positions", num_joints=6)
 
