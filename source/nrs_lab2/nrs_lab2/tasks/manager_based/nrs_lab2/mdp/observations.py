@@ -58,10 +58,7 @@ def load_hdf5_positions(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset
 # Observation: target joints (horizon-based)
 # ------------------------------------------------------
 def get_hdf5_target_joints(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
-    """
-    horizon 길이만큼 미래 joint target trajectory 반환
-    ex) [q_t, q_{t+1}, ..., q_{t+horizon-1}]
-    """
+    """현재 step 기준 horizon 길이만큼 joint target 반환"""
     global _hdf5_joints
     if _hdf5_joints is None:
         D = env.scene["robot"].num_joints
@@ -71,35 +68,34 @@ def get_hdf5_target_joints(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Te
     step = env.episode_length_buf[0].item()
     E = env.max_episode_length
     idx = min(int(step / E * T), T - 1)
-
-    # horizon 만큼 future joint target 추출
     future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
+
+    # ✅ flatten (horizon, D) → (1, horizon * D)
     future_targets = _hdf5_joints[future_idx].reshape(1, horizon * D)
     return future_targets.repeat(env.num_envs, 1)
+
 
 
 # ------------------------------------------------------
 # Observation: target positions (horizon-based)
 # ------------------------------------------------------
 def get_hdf5_target_positions(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
-    """
-    horizon 길이만큼 미래 position target trajectory 반환
-    ex) [p_t, p_{t+1}, ..., p_{t+horizon-1}]
-    """
+    """현재 step 기준 horizon 길이만큼 position target 반환"""
     global _hdf5_positions
     if _hdf5_positions is None:
-        # fallback: robot base position dimension (usually 3)
-        D = 3
+        D = 6  # position (x,y,z,roll,pitch,yaw) 기준
         return torch.zeros((env.num_envs, horizon * D), device=env.device, dtype=torch.float32)
 
     T, D = _hdf5_positions.shape
     step = env.episode_length_buf[0].item()
     E = env.max_episode_length
     idx = min(int(step / E * T), T - 1)
-
     future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
+
+    # ✅ flatten (horizon, D) → (1, horizon * D)
     future_targets = _hdf5_positions[future_idx].reshape(1, horizon * D)
     return future_targets.repeat(env.num_envs, 1)
+
 
 
 # ------------------------------------------------------
