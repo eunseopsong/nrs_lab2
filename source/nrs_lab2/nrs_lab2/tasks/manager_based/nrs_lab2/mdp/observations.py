@@ -1,72 +1,104 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 Observation utilities for UR10e spindle environment.
-Updated for integration with nrs_ik_core (C++ FK module).
+- Integrated with nrs_ik_core (C++ FK module)
+- Separate loaders for joint and position HDF5 datasets
 """
 
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
-from nrs_ik_core import IKSolver   # ✅ C++ pybind 모듈로 변경 (nrs_ik_py → nrs_ik_core)
+from nrs_ik_core import IKSolver  # ✅ pybind11 기반 C++ 모듈
+
 
 # ------------------------------------------------------
 # Global buffers
 # ------------------------------------------------------
-_hdf5_trajectory = None
+_hdf5_joints = None
+_hdf5_positions = None
 _step_idx = 0
 
 
 # ------------------------------------------------------
-# HDF5 trajectory loader
+# HDF5 loader: Joints
 # ------------------------------------------------------
-def load_hdf5_trajectory(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "joint_positions"):
-    """HDF5 trajectory 데이터를 로드 (reset 시 1회 호출)"""
-    global _hdf5_trajectory, _step_idx
+def load_hdf5_joints(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "target_joints"):
+    """HDF5 trajectory (joint targets) 데이터를 로드"""
+    global _hdf5_joints, _step_idx
     import h5py
 
     with h5py.File(file_path, "r") as f:
         if dataset_key not in f:
-            raise KeyError(f"[ERROR] HDF5: {dataset_key} not found. Available keys: {list(f.keys())}")
-        data = f[dataset_key][:]  # [T, D]
+            raise KeyError(f"[ERROR] HDF5 (joints): '{dataset_key}' not found. Available keys: {list(f.keys())}")
+        data = f[dataset_key][:]  # shape [T, D]
 
-    _hdf5_trajectory = torch.tensor(data, dtype=torch.float32, device=env.device)
+    _hdf5_joints = torch.tensor(data, dtype=torch.float32, device=env.device)
     _step_idx = 0
-    print(f"[INFO] Loaded HDF5 trajectory of shape {_hdf5_trajectory.shape}")
+    print(f"[INFO] Loaded HDF5 joints of shape {_hdf5_joints.shape} from {file_path}")
 
 
 # ------------------------------------------------------
-# Observation: next target joints
+# HDF5 loader: Positions
 # ------------------------------------------------------
-def get_hdf5_target(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """현재 step에 해당하는 target joint 반환"""
-    global _hdf5_trajectory, _step_idx
-    if _hdf5_trajectory is None:
-        raise RuntimeError("HDF5 trajectory not loaded. Did you register load_hdf5_trajectory?")
+def load_hdf5_positions(env: ManagerBasedRLEnv, env_ids, file_path: str, dataset_key: str = "target_positions"):
+    """HDF5 trajectory (position targets) 데이터를 로드"""
+    global _hdf5_positions, _step_idx
+    import h5py
 
-    T = _hdf5_trajectory.shape[0]
-    E = env.max_episode_length
-    step = env.episode_length_buf[0].item()
-    idx = min(int(step / E * T), T - 1)
-    return _hdf5_trajectory[idx]
+    with h5py.File(file_path, "r") as f:
+        if dataset_key not in f:
+            raise KeyError(f"[ERROR] HDF5 (positions): '{dataset_key}' not found. Available keys: {list(f.keys())}")
+        data = f[dataset_key][:]  # shape [T, D]
+
+    _hdf5_positions = torch.tensor(data, dtype=torch.float32, device=env.device)
+    _step_idx = 0
+    print(f"[INFO] Loaded HDF5 positions of shape {_hdf5_positions.shape} from {file_path}")
 
 
 # ------------------------------------------------------
-# Observation: future target joints
+# Observation: target joints (horizon-based)
 # ------------------------------------------------------
-def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
-    global _hdf5_trajectory, _step_idx
-    if _hdf5_trajectory is None:
-        # dummy: [num_envs, horizon * D]
+def get_hdf5_target_joints(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
+    """
+    horizon 길이만큼 미래 joint target trajectory 반환
+    ex) [q_t, q_{t+1}, ..., q_{t+horizon-1}]
+    """
+    global _hdf5_joints
+    if _hdf5_joints is None:
         D = env.scene["robot"].num_joints
         return torch.zeros((env.num_envs, horizon * D), device=env.device, dtype=torch.float32)
 
-    T, D = _hdf5_trajectory.shape
+    T, D = _hdf5_joints.shape
     step = env.episode_length_buf[0].item()
     E = env.max_episode_length
     idx = min(int(step / E * T), T - 1)
 
-    # horizon 만큼 future target 뽑기
+    # horizon 만큼 future joint target 추출
     future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
-    future_targets = _hdf5_trajectory[future_idx].reshape(1, horizon * D)
+    future_targets = _hdf5_joints[future_idx].reshape(1, horizon * D)
+    return future_targets.repeat(env.num_envs, 1)
+
+
+# ------------------------------------------------------
+# Observation: target positions (horizon-based)
+# ------------------------------------------------------
+def get_hdf5_target_positions(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
+    """
+    horizon 길이만큼 미래 position target trajectory 반환
+    ex) [p_t, p_{t+1}, ..., p_{t+horizon-1}]
+    """
+    global _hdf5_positions
+    if _hdf5_positions is None:
+        # fallback: robot base position dimension (usually 3)
+        D = 3
+        return torch.zeros((env.num_envs, horizon * D), device=env.device, dtype=torch.float32)
+
+    T, D = _hdf5_positions.shape
+    step = env.episode_length_buf[0].item()
+    E = env.max_episode_length
+    idx = min(int(step / E * T), T - 1)
+
+    future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
+    future_targets = _hdf5_positions[future_idx].reshape(1, horizon * D)
     return future_targets.repeat(env.num_envs, 1)
 
 
@@ -74,13 +106,10 @@ def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Te
 # ✅ Observation: Contact Sensor Forces
 # ------------------------------------------------------
 def get_contact_forces(env, sensor_name="contact_forces"):
-    """
-    Returns mean contact wrench [Fx, Fy, Fz, 0, 0, 0] for debugging and RL observation.
-    """
+    """Mean contact wrench [Fx, Fy, Fz, 0, 0, 0]"""
     sensor = env.scene.sensors[sensor_name]
-    data = sensor.data
-    forces_w = data.net_forces_w
-    mean_force = torch.mean(forces_w, dim=1)  # (num_envs, 3)
+    forces_w = sensor.data.net_forces_w
+    mean_force = torch.mean(forces_w, dim=1)
     zeros_torque = torch.zeros_like(mean_force)
     contact_wrench = torch.cat([mean_force, zeros_torque], dim=-1)
 
@@ -92,58 +121,36 @@ def get_contact_forces(env, sensor_name="contact_forces"):
     return contact_wrench
 
 
-# ============================================================
-# Camera distance observation (with debug)
-# ============================================================
-def get_camera_distance(env, sensor_name="camera", debug_interval: int = 100) -> torch.Tensor:
-    """
-    Retrieve depth (distance-to-image-plane) data from a camera sensor.
-    Returns: (num_envs, 1) tensor of mean distances [m]
-    """
+# ------------------------------------------------------
+# Camera distance & normals
+# ------------------------------------------------------
+def get_camera_distance(env, sensor_name="camera", debug_interval: int = 100):
+    """Compute mean camera depth (distance-to-image-plane)."""
     if sensor_name not in env.scene.sensors:
         raise KeyError(f"[ERROR] Camera sensor '{sensor_name}' not found in scene.sensors.")
-
     sensor = env.scene.sensors[sensor_name]
     data = sensor.data.output.get("distance_to_image_plane", None)
     if data is None:
-        raise RuntimeError("[ERROR] Camera data output 'distance_to_image_plane' is missing.")
-
+        raise RuntimeError("[ERROR] Missing 'distance_to_image_plane' in camera data output.")
     valid_mask = torch.isfinite(data) & (data > 0)
     valid_data = torch.where(valid_mask, data, torch.nan)
-    mean_distance = torch.nanmean(valid_data.view(valid_data.shape[0], -1), dim=1)
-    mean_distance = mean_distance.unsqueeze(1)
+    mean_distance = torch.nanmean(valid_data.view(valid_data.shape[0], -1), dim=1).unsqueeze(1)
 
     if env.common_step_counter % debug_interval == 0:
         md_cpu = mean_distance[0].detach().cpu().item()
         print(f"[Step {env.common_step_counter}] Mean camera distance: {md_cpu:.4f} m")
 
-        if env.common_step_counter % (debug_interval * 10) == 0:
-            import matplotlib.pyplot as plt, os
-            save_dir = os.path.expanduser("~/nrs_lab2/outputs/camera")
-            os.makedirs(save_dir, exist_ok=True)
-            depth_img = data[0].detach().cpu().numpy()
-            plt.imshow(depth_img, cmap="plasma")
-            plt.colorbar(label="Distance [m]")
-            plt.title(f"Camera Distance (Step {env.common_step_counter})")
-            save_path = os.path.join(save_dir, f"camera_distance_step{env.common_step_counter}.png")
-            plt.savefig(save_path)
-            plt.close()
-            print(f"[INFO] Saved depth image: {save_path}")
-
     return mean_distance
 
 
 def get_camera_normals(env, sensor_name="camera"):
-    """
-    Retrieve mean surface normal (x, y, z) from the camera sensor.
-    """
+    """Compute mean surface normal (x, y, z) from the camera."""
     cam_sensor = env.scene.sensors[sensor_name]
-    normals = cam_sensor.data.output["normals"]
+    normals = cam_sensor.data.output.get("normals", None)
     if normals is None:
         return torch.zeros((env.num_envs, 3), device=env.device)
 
     normals_mean = normals.mean(dim=(1, 2))
     if env.common_step_counter % 100 == 0:
         print(f"[Camera DEBUG] Step {env.common_step_counter}: Mean surface normal = {normals_mean[0].cpu().numpy()}")
-
     return normals_mean

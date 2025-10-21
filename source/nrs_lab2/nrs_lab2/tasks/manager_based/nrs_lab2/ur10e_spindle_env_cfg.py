@@ -10,14 +10,14 @@
 """
 Manager-based Isaac Lab environment for the UR10e robot equipped with a spindle tool.
 
-This environment tracks target joint trajectories and adds a Contact Sensor to the
-end-effector to measure force / torque feedback.
+This environment tracks target joint and position trajectories from HDF5 datasets,
+and supports additional sensors such as contact and camera modules.
 
 Key features:
-- Joint trajectory tracking with tanh-shaped reward.  
-- Trajectory or time-based termination.  
-- End-effector contact force sensor integration for feedback and RL observation.  
-- Fully compatible with Isaac Lab’s manager-based MDP structure.
+- Horizon-based joint & position trajectory tracking
+- Tanh/exponential-shaped reward formulation
+- End-effector contact force & camera integration (optional)
+- Compatible with Isaac Lab’s manager-based MDP structure
 
 Example usage:
 .. code-block:: bash
@@ -28,14 +28,12 @@ Example usage:
 # -----------------------------------------------------------------------------
 # Imports
 # -----------------------------------------------------------------------------
-
 from __future__ import annotations
 from dataclasses import MISSING
 import importlib
 import torch
-import math
-
 import isaaclab.sim as sim_utils
+
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import (
@@ -49,12 +47,14 @@ from isaaclab.managers import (
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-from isaaclab.sensors import ContactSensorCfg, CameraCfg  # ✅ Camera sensor 추가
+from isaaclab.sensors import ContactSensorCfg, CameraCfg  # ✅ 카메라 유지
 
-# Reach MDP utilities
+# Reach manipulation utilities
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
-# Local modules (dynamically import for robustness)
+# -----------------------------------------------------------------------------
+# Local modules (dynamic import)
+# -----------------------------------------------------------------------------
 local_obs = importlib.import_module(
     "nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations"
 )
@@ -62,14 +62,14 @@ local_rewards = importlib.import_module(
     "nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.rewards"
 )
 
-# Robot and sensor assets
+# -----------------------------------------------------------------------------
+# Robot asset
+# -----------------------------------------------------------------------------
 from assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
-
 
 # -----------------------------------------------------------------------------
 # Scene Configuration
 # -----------------------------------------------------------------------------
-
 @configclass
 class SpindleSceneCfg(InteractiveSceneCfg):
     ground = AssetBaseCfg(
@@ -93,7 +93,7 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # Contact sensor (replicated per env)
+    # ✅ Contact Sensor (optional)
     # contact_forces = ContactSensorCfg(
     #     prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link",
     #     update_period=0.0,
@@ -101,12 +101,7 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     #     debug_vis=True,
     # )
 
-    # -----------------------------------------------------------------------------
-    # Camera Sensor Configuration
-    # -----------------------------------------------------------------------------
-    # 오일러 각(-180, 0, -180)을 쿼터니언(ros convention)으로 직접 계산한 값:
-    # qx, qy, qz, qw = (0, 0, 0, 1)와 동일한 방향이지만 180° 회전 상태이므로 약간 다름.
-    # 실제 변환 결과: (x=0, y=0, z=1, w=0) (즉, 180도 yaw)
+    # ✅ Camera Sensor (optional)
     # camera = CameraCfg(
     #     prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link/camera_sensors",
     #     update_period=0.1,
@@ -121,7 +116,7 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     #     ),
     #     offset=CameraCfg.OffsetCfg(
     #         pos=(0.0, -0.1, 0.0),
-    #         rot=(0.0, 0.0, 1.0, 0.0),  # ← ✅ 함수 대신 직접 쿼터니언 기입
+    #         rot=(0.0, 0.0, 1.0, 0.0),
     #         convention="ros",
     #     ),
     # )
@@ -129,7 +124,6 @@ class SpindleSceneCfg(InteractiveSceneCfg):
 # -----------------------------------------------------------------------------
 # Actions
 # -----------------------------------------------------------------------------
-
 @configclass
 class ActionsCfg:
     arm_action: ActionTerm = MISSING
@@ -137,81 +131,81 @@ class ActionsCfg:
 # -----------------------------------------------------------------------------
 # Observations
 # -----------------------------------------------------------------------------
-
 @configclass
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         # 기본 joint 관측
-        joint_pos = ObsTerm(
-            func=mdp.joint_pos_rel,
-            noise=Unoise(n_min=-0.01, n_max=0.01),
-        )
-        joint_vel = ObsTerm(
-            func=mdp.joint_vel_rel,
-            noise=Unoise(n_min=-0.01, n_max=0.01),
-        )
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         actions = ObsTerm(func=mdp.last_action)
 
-        # ee_state = ObsTerm(func=local_obs.get_ee_observation)   # ✅ 추가
-
-        # HDF5 기반 target 예측 (trajectory 기반)
-        target_future = ObsTerm(
-            func=local_obs.get_hdf5_target_future,
+        # ✅ HDF5 기반 horizon-length trajectory 관측
+        target_joints = ObsTerm(
+            func=local_obs.get_hdf5_target_joints,
+            params={"horizon": 5},
+        )
+        target_positions = ObsTerm(
+            func=local_obs.get_hdf5_target_positions,
             params={"horizon": 5},
         )
 
-        # ✅ Contact Sensor 데이터 추가 (평균 Fx, Fy, Fz + dummy Tx,Ty,Tz)
+        # ✅ 추가 센서 (필요 시 주석 해제)
         # contact_forces = ObsTerm(
         #     func=local_obs.get_contact_forces,
-        #     params={"sensor_name": "contact_forces"},  # scene.contact_forces 이름과 동일해야 함
+        #     params={"sensor_name": "contact_forces"},
         # )
-
-        # ✅ Camera distance 추가
         # camera_distance = ObsTerm(
         #     func=local_obs.get_camera_distance,
         #     params={"sensor_name": "camera"},
         # )
-
         # camera_normals = ObsTerm(
         #     func=local_obs.get_camera_normals,
         #     params={"sensor_name": "camera"},
         # )
 
-
         def __post_init__(self):
-            # 관측 오염(노이즈) 허용
             self.enable_corruption = True
-            # ✅ 모든 관측값을 하나의 벡터로 결합 (policy input으로 전달)
-            self.concatenate_terms = True
+            self.concatenate_terms = True  # 모든 항목을 단일 observation vector로 결합
 
-    # RL 정책에서 사용할 observation 그룹
     policy: PolicyCfg = PolicyCfg()
-
-
 
 # -----------------------------------------------------------------------------
 # Events
 # -----------------------------------------------------------------------------
-
 @configclass
 class EventCfg:
+    """Episode 시작 시 두 개의 trajectory (joints / positions)를 로드"""
+
     reset_robot_joints = EventTerm(
         func=mdp.reset_joints_by_scale,
         mode="reset",
         params={"position_range": (1.0, 1.0), "velocity_range": (0.0, 0.0)},
     )
-    load_hdf5 = EventTerm(
-        func=local_obs.load_hdf5_trajectory,
+
+    # ✅ Joint trajectory 로드
+    load_hdf5_joints = EventTerm(
+        func=local_obs.load_hdf5_joints,
         mode="reset",
-        params={"trajectory": None},
+        params={
+            "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.h5",
+            "dataset_key": "target_joints",
+        },
+    )
+
+    # ✅ Position trajectory 로드
+    load_hdf5_positions = EventTerm(
+        func=local_obs.load_hdf5_positions,
+        mode="reset",
+        params={
+            "file_path": "/home/eunseop/nrs_lab2/datasets/hand_g_recording.h5",
+            "dataset_key": "target_positions",
+        },
     )
 
 # -----------------------------------------------------------------------------
-# Rewards (Position-only, Exponential Lookahead)
-# Version: v1
+# Rewards
 # -----------------------------------------------------------------------------
-
 @configclass
 class RewardsCfg:
     joint_tracking_reward = RewTerm(
@@ -219,7 +213,7 @@ class RewardsCfg:
         weight=1.0,
     )
 
-    # (2) Contact stability reward
+    # ✅ 센서 기반 보상 (옵션)
     # contact_force_reward = RewTerm(
     #     func=local_rewards.contact_force_reward,
     #     weight=0.05,
@@ -229,21 +223,18 @@ class RewardsCfg:
     #         "fz_max": 20.0,
     #     },
     # )
-
-    # # (3) ✅ Camera distance reward (스핀들 길이 유지)
     # camera_distance_reward = RewTerm(
     #     func=local_rewards.camera_distance_reward,
     #     weight=0.05,
     #     params={
-    #         "target_distance": 0.185,  # spindle 길이
-    #         "sigma": 0.035,             # 거리 허용 오차 범위 (±2cm)
+    #         "target_distance": 0.185,
+    #         "sigma": 0.035,
     #     },
     # )
 
 # -----------------------------------------------------------------------------
 # Terminations
 # -----------------------------------------------------------------------------
-
 @configclass
 class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
@@ -251,7 +242,6 @@ class TerminationsCfg:
 # -----------------------------------------------------------------------------
 # Environment Configuration
 # -----------------------------------------------------------------------------
-
 @configclass
 class UR10eSpindleEnvCfg(ManagerBasedRLEnvCfg):
     scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1024, env_spacing=2.5)
