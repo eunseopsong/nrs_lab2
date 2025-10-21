@@ -40,14 +40,14 @@ class PolishingPoseHoldEnvCfg(UR10eSpindleEnvCfg):
         )
 
         # 🔹 HDF5 trajectory (positions)
-        self.events.load_hdf5_positions = EventTerm(
-            func=local_obs.load_hdf5_positions,
-            mode="reset",
-            params={
-                "file_path": "/home/eunseop/nrs_lab2/datasets/hand_g_recording.h5",
-                "dataset_key": "target_positions",
-            },
-        )
+        # self.events.load_hdf5_positions = EventTerm(
+        #     func=local_obs.load_hdf5_positions,
+        #     mode="reset",
+        #     params={
+        #         "file_path": "/home/eunseop/nrs_lab2/datasets/hand_g_recording.h5",
+        #         "dataset_key": "target_positions",
+        #     },
+        # )
 
 
 @configclass
