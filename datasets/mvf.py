@@ -28,8 +28,8 @@ def process_joint_recording(input_txt, output_txt, window_size=100, scale_factor
     # 5. 결과 저장 (.h5)
     h5_output = output_txt.replace(".txt", ".h5")
     with h5py.File(h5_output, "w") as f:
-        f.create_dataset("joint_positions", data=interpolated)
-    print(f"✅ '{h5_output}' 저장 완료! (dataset key: 'joint_positions')")
+        f.create_dataset("target_joints", data=interpolated)
+    print(f"✅ '{h5_output}' 저장 완료! (dataset key: 'target_joints')")
 
 if __name__ == "__main__":
     input_file = "joint_recording.txt"
