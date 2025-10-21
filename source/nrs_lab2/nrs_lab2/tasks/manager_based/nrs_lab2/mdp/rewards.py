@@ -119,37 +119,52 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
 # (2) Position Tracking Reward
 # -----------------------------------------------------------
 def position_tracking_reward(env: "ManagerBasedRLEnv"):
-    """Cartesian position tracking reward (exp kernel, horizon-based)"""
+    """Cartesian position tracking reward (exp kernel + velocity term, horizon-based)"""
+    global _position_tracking_history, _position_reward_history
+
     robot = env.scene["robot"]
-    ee_pos = robot.data.ee_pos_w[:, 0, :]  # (num_envs, 3)
+    ee_pos = robot.data.ee_pos_w[:, 0, :]             # (num_envs, 3)
+    ee_vel = robot.data.ee_lin_vel_w[:, 0, :]         # (num_envs, 3)
     dt = getattr(env.sim, "dt", 1.0 / 30.0) * getattr(env, "decimation", 1)
     step = int(env.common_step_counter)
 
-    # ✅ Horizon-based position target
-    fut = get_hdf5_target_positions(env, horizon=8)
-    D = fut.shape[1] // 8
+    # ✅ Horizon-based position target (horizon = 8)
+    horizon = 8
+    fut = get_hdf5_target_positions(env, horizon=horizon)
+    D = fut.shape[1] // horizon  # 3
     p_star_curr = fut[:, :D]
     p_star_next = fut[:, D:2*D]
     v_star = (p_star_next - p_star_curr) / (dt + 1e-8)
 
     # -------- errors --------
     e_p = ee_pos - p_star_next
-    e_v = torch.zeros_like(e_p)  # 실제 velocity term 생략 가능
+    e_v = ee_vel - v_star
 
     # -------- gains --------
     k_pos = torch.tensor([6.0], device=ee_pos.device)
+    k_vel = torch.tensor([0.5], device=ee_pos.device)
+
+    # -------- exponential kernel rewards --------
     e_p2 = torch.sum(e_p ** 2, dim=1)
+    e_v2 = torch.sum(e_v ** 2, dim=1)
 
-    # -------- rewards --------
     r_pose = torch.exp(-k_pos * e_p2)
-    total = r_pose  # velocity term 생략 가능
+    r_vel  = torch.exp(-k_vel * e_v2)
 
+    # -------- total reward --------
+    total = 0.7 * r_pose + 0.3 * r_vel
+
+    # -------- debug print (10-step마다) --------
     if step % 10 == 0:
-        print(f"[Position Step {step}] mean(|e_p|)={torch.norm(e_p, dim=1).mean():.3f}, total={total.mean():.3f}")
+        print(
+            f"[Position Step {step}] mean(|e_p|)={torch.norm(e_p, dim=1).mean():.3f}, "
+            f"mean(|e_v|)={torch.norm(e_v, dim=1).mean():.3f}, "
+            f"r_pose={r_pose.mean():.3f}, r_vel={r_vel.mean():.3f}, total={total.mean():.3f}"
+        )
 
     # -------- history 저장 --------
     _position_tracking_history.append((step, p_star_next[0].cpu().numpy(), ee_pos[0].cpu().numpy()))
-    _position_reward_history.append((step, r_pose[0].cpu().numpy()))
+    _position_reward_history.append((step, r_pose[0].cpu().numpy(), r_vel[0].cpu().numpy(), total[0].cpu().numpy()))
 
     # -------- episode 종료 시 시각화 --------
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:

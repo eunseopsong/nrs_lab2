@@ -1,7 +1,4 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers
-# (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
 # SPDX-License-Identifier: BSD-3-Clause
 # -----------------------------------------------------------------------------
 # Title: UR10e + Spindle (Environment with Contact Sensor)
@@ -10,19 +7,11 @@
 """
 Manager-based Isaac Lab environment for the UR10e robot equipped with a spindle tool.
 
-This environment tracks target joint and position trajectories from HDF5 datasets,
-and supports additional sensors such as contact and camera modules.
-
 Key features:
 - Horizon-based joint & position trajectory tracking
-- Tanh/exponential-shaped reward formulation
-- End-effector contact force & camera integration (optional)
-- Compatible with Isaac Lab’s manager-based MDP structure
-
-Example usage:
-.. code-block:: bash
-
-    ./isaaclab.sh -p nrs_lab2/tasks/manager_based/ur10e_spindle_env_cfg.py --enable_cameras
+- Exponential-shaped reward for position tracking
+- End-effector position observation (get_ee_pos)
+- Contact/camera sensor integration (optional)
 """
 
 # -----------------------------------------------------------------------------
@@ -47,7 +36,7 @@ from isaaclab.managers import (
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-from isaaclab.sensors import ContactSensorCfg, CameraCfg  # ✅ 카메라 유지
+from isaaclab.sensors import ContactSensorCfg, CameraCfg
 
 # Reach manipulation utilities
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
@@ -93,34 +82,6 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # ✅ Contact Sensor (optional)
-    # contact_forces = ContactSensorCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link",
-    #     update_period=0.0,
-    #     history_length=10,
-    #     debug_vis=True,
-    # )
-
-    # ✅ Camera Sensor (optional)
-    # camera = CameraCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link/camera_sensors",
-    #     update_period=0.1,
-    #     height=480,
-    #     width=640,
-    #     data_types=["rgb", "distance_to_image_plane", "normals"],
-    #     spawn=sim_utils.PinholeCameraCfg(
-    #         focal_length=18.14756,
-    #         focus_distance=40.0,
-    #         horizontal_aperture=20.955,
-    #         clipping_range=(0.1, 1.0e5),
-    #     ),
-    #     offset=CameraCfg.OffsetCfg(
-    #         pos=(0.0, -0.1, 0.0),
-    #         rot=(0.0, 0.0, 1.0, 0.0),
-    #         convention="ros",
-    #     ),
-    # )
-
 # -----------------------------------------------------------------------------
 # Actions
 # -----------------------------------------------------------------------------
@@ -140,6 +101,12 @@ class ObservationsCfg:
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         actions = ObsTerm(func=mdp.last_action)
 
+        # ✅ EE position (현재 엔드이펙터 위치)
+        ee_pos = ObsTerm(
+            func=mdp.get_ee_pos,
+            params={"asset_name": "robot", "frame_name": "wrist_3_link"},
+        )
+
         # ✅ HDF5 기반 horizon-length trajectory 관측
         target_joints = ObsTerm(
             func=local_obs.get_hdf5_target_joints,
@@ -150,23 +117,9 @@ class ObservationsCfg:
             params={"horizon": 5},
         )
 
-        # ✅ 추가 센서 (필요 시 주석 해제)
-        # contact_forces = ObsTerm(
-        #     func=local_obs.get_contact_forces,
-        #     params={"sensor_name": "contact_forces"},
-        # )
-        # camera_distance = ObsTerm(
-        #     func=local_obs.get_camera_distance,
-        #     params={"sensor_name": "camera"},
-        # )
-        # camera_normals = ObsTerm(
-        #     func=local_obs.get_camera_normals,
-        #     params={"sensor_name": "camera"},
-        # )
-
         def __post_init__(self):
             self.enable_corruption = True
-            self.concatenate_terms = True  # 모든 항목을 단일 observation vector로 결합
+            self.concatenate_terms = True  # 모든 항목을 하나의 observation vector로 결합
 
     policy: PolicyCfg = PolicyCfg()
 
@@ -208,29 +161,16 @@ class EventCfg:
 # -----------------------------------------------------------------------------
 @configclass
 class RewardsCfg:
-    joint_tracking_reward = RewTerm(
-        func=local_rewards.joint_tracking_reward,
+    # joint_tracking_reward = RewTerm(
+    #     func=local_rewards.joint_tracking_reward,
+    #     weight=1.0,
+    # )
+
+    # ✅ EE Position Tracking Reward
+    position_tracking_reward = RewTerm(
+        func=local_rewards.position_tracking_reward,
         weight=1.0,
     )
-
-    # ✅ 센서 기반 보상 (옵션)
-    # contact_force_reward = RewTerm(
-    #     func=local_rewards.contact_force_reward,
-    #     weight=0.05,
-    #     params={
-    #         "sensor_name": "contact_forces",
-    #         "fz_min": 5.0,
-    #         "fz_max": 20.0,
-    #     },
-    # )
-    # camera_distance_reward = RewTerm(
-    #     func=local_rewards.camera_distance_reward,
-    #     weight=0.05,
-    #     params={
-    #         "target_distance": 0.185,
-    #         "sigma": 0.035,
-    #     },
-    # )
 
 # -----------------------------------------------------------------------------
 # Terminations
