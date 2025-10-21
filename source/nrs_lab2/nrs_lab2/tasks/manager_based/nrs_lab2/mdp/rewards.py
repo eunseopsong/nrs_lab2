@@ -2,38 +2,22 @@
 """
 v21.0: Dual Tracking Reward (Joint + Cartesian Position)
 ---------------------------------------------------------
-- **Reward Type:** Exponential kernel (no tanh)
-- **Goal:** Joint-space + Cartesian-space 병렬 학습 지원  
-- **Joint Reward (q-space):** q₂ 안정화 + velocity damping + weighted bias correction  
-- **Position Reward (x-space):** End-effector 위치 기반 exponential decay  
-- **Visualization:** Episode 종료 시 joint/position 각각 별도 그래프 저장
+- Reward Type: Exponential kernel (no tanh)
+- Goal: Joint-space + Cartesian-space 병렬 학습 지원
 
-- **Joint Parameters**
-    - **Joint Weights (wj):** [1.0, 2.0, 1.0, 4.0, 1.0, 1.0]
-    - **k_pos:** [1.0, 8.0, 2.0, 6.0, 2.0, 2.0]
-    - **k_vel:** [0.10, 0.40, 0.10, 0.40, 0.10, 0.10]
-    - **Target Source:** get_hdf5_target_joints(env, horizon=8)
+Joint Reward:
+    - q₂ 안정화 + velocity damping + weighted bias correction
+    - Target: get_hdf5_target_joints(env, horizon=8)
+Position Reward:
+    - 6DoF (x, y, z, roll, pitch, yaw)
+    - Target: get_hdf5_target_positions(env, horizon=1)
 
-- **Position Parameters**
-    - **k_pos:** 6.0
-    - **Target Source:** get_hdf5_target_positions(env, horizon=8)
-    - **Error Metric:** Cartesian distance (‖p - p*‖²)
-
-- **Home Pose (UR10E_HOME_DICT):**
-    shoulder_pan_joint :  0.673993
-    shoulder_lift_joint : -1.266343
-    elbow_joint         : -2.472206
-    wrist_1_joint       : -1.160399
-    wrist_2_joint       :  1.479353
-    wrist_3_joint       :  1.324695
-
-- **Episode End Visualization**
-    (1) Joint Tracking → ~/nrs_lab2/outputs/png/joint_tracking_v21_epX.png  
-    (2) Position Tracking → ~/nrs_lab2/outputs/png/pos_tracking_v21_epX.png  
-    (3) Joint Reward Summary → ~/nrs_lab2/outputs/rewards/r_pose_total_joint_v21_epX.png  
-    (4) Position Reward Summary → ~/nrs_lab2/outputs/rewards/r_pose_total_pos_v21_epX.png
+Visualization:
+    (1) joint_tracking_v21_epX.png
+    (2) pos_tracking_v21_epX.png
+    (3) r_pose_total_joint_v21_epX.png
+    (4) r_pose_total_pos_v21_epX.png
 """
-
 
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -61,41 +45,38 @@ _position_reward_history = []
 _episode_counter_joint = 0
 _episode_counter_position = 0
 
+
 # -----------------------------------------------------------
 # (1) Joint Tracking Reward
 # -----------------------------------------------------------
 def joint_tracking_reward(env: "ManagerBasedRLEnv"):
-    """Joint-space tracking reward with exponential kernel (v20.1 style)"""
+    """Joint-space tracking reward (exponential kernel)"""
     robot = env.scene["robot"]
-    q  = robot.data.joint_pos[:, :6]
-    qd = robot.data.joint_vel[:, :6]
+    q, qd = robot.data.joint_pos[:, :6], robot.data.joint_vel[:, :6]
     dt = getattr(env.sim, "dt", 1.0 / 30.0) * getattr(env, "decimation", 1)
-    D  = q.shape[1]
+    D = q.shape[1]
     step = int(env.common_step_counter)
 
-    # ✅ Horizon-based target
+    # Horizon-based target
     fut = get_hdf5_target_joints(env, horizon=8)
-    q_star_curr = fut[:, :D]
-    q_star_next = fut[:, D:2*D]
+    q_star_curr, q_star_next = fut[:, :D], fut[:, D:2*D]
     qd_star = (q_star_next - q_star_curr) / (dt + 1e-8)
 
-    # -------- errors --------
+    # Errors
     e_q, e_qd = q - q_star_next, qd - qd_star
 
-    # -------- weights & gains --------
+    # Weights & gains
     wj = torch.tensor([1, 2.0, 1, 4.0, 1, 1], device=q.device).unsqueeze(0)
     k_pos = torch.tensor([1.0, 8.0, 2.0, 6.0, 2.0, 2.0], device=q.device).unsqueeze(0)
     k_vel = torch.tensor([0.10, 0.40, 0.10, 0.40, 0.10, 0.10], device=q.device).unsqueeze(0)
 
     e_q2, e_qd2 = wj * (e_q ** 2), wj * (e_qd ** 2)
-
-    # -------- rewards --------
     r_pose_jointwise = torch.exp(-k_pos * e_q2)
-    r_vel_jointwise  = torch.exp(-k_vel * e_qd2)
+    r_vel_jointwise = torch.exp(-k_vel * e_qd2)
     r_pose, r_vel = r_pose_jointwise.sum(dim=1), r_vel_jointwise.sum(dim=1)
     total = 0.9 * r_pose + 0.1 * r_vel
 
-    # -------- console log every 10 steps --------
+    # Console log every 10 steps
     if step % 10 == 0:
         print(f"[Joint Step {step}] mean(e_q)={torch.norm(e_q, dim=1).mean():.3f}, total={total.mean():.3f}")
         mean_e_q_abs = torch.mean(torch.abs(e_q), dim=0).cpu().numpy()
@@ -103,11 +84,11 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
         for j in range(D):
             print(f"  joint{j+1}: |mean(e_q)|={mean_e_q_abs[j]:.3f}, r_pose={mean_r_pose[j]:.3f}")
 
-    # -------- history 저장 --------
+    # History
     _joint_tracking_history.append((step, q_star_next[0].cpu().numpy(), q[0].cpu().numpy()))
     _joint_reward_history.append((step, r_pose_jointwise[0].cpu().numpy()))
 
-    # -------- episode 종료 시 시각화 --------
+    # Visualization
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         episode_steps = int(env.max_episode_length)
         if step > 0 and (step % episode_steps == episode_steps - 1):
@@ -116,66 +97,64 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     return total
 
 
-
-
+# -----------------------------------------------------------
+# (2) Position Tracking Reward (6DoF)
+# -----------------------------------------------------------
 def position_tracking_reward(env: "ManagerBasedRLEnv"):
-    """
-    Position Tracking Reward (6-DoF: x, y, z, roll, pitch, yaw)
-    ------------------------------------------------------------
-    - EE pose (position + orientation[RPY]) vs target_pose(HDF5)
-    - exp(-k_pos * error^2) 형태
-    """
+    """6D End-effector pose tracking reward with exponential kernel"""
     robot = env.scene["robot"]
     device = robot.data.body_pos_w.device
+    step = int(env.common_step_counter)
 
-    # ------------------------------
-    # (1) EE pose (world)
-    # ------------------------------
+    # EE pose
     link_idx = robot.find_bodies("wrist_3_link")[0]
-
-    # ✅ 항상 (N, 3) 보장
     pos_w = robot.data.body_pos_w[:, link_idx, :].squeeze(1)
     quat_w = robot.data.body_quat_w[:, link_idx, :].squeeze(1)
-
-    # ✅ (N, 3)
     euler_w = quat_to_euler_xyz(quat_w)
+    ee_pose = torch.cat([pos_w, euler_w], dim=1)  # (N,6)
 
-    # ✅ (N, 6)
-    ee_pose = torch.cat([pos_w, euler_w], dim=1)
-
-    # ------------------------------
-    # (2) Target pose (HDF5)
-    # ------------------------------
+    # Target pose
     target_pose = get_hdf5_target_positions(env, horizon=1)
     if target_pose.ndim == 2 and target_pose.shape[1] > 6:
         target_pose = target_pose[:, :6]
-    elif target_pose.ndim == 3:  # 혹시 (N,1,6) 형태라면 squeeze
+    elif target_pose.ndim == 3:
         target_pose = target_pose.squeeze(1)
 
-    # ------------------------------
-    # (3) Error + Weighted Reward
-    # ------------------------------
+    # Reward
     e_pose = ee_pose - target_pose
     w = torch.tensor([1.0, 1.0, 1.0, 0.3, 0.3, 0.3], device=device).unsqueeze(0)
     e_sq = (w * e_pose) ** 2
-
     k_pos = 3.0
-    reward = torch.exp(-k_pos * e_sq)
-    reward = torch.mean(reward, dim=1)  # (N,)
+    r_pose_axiswise = torch.exp(-k_pos * e_sq)
+    reward = torch.mean(r_pose_axiswise, dim=1)
 
-    # ------------------------------
-    # (4) 기록 (시각화용)
-    # ------------------------------
+    # History
     global _position_tracking_history, _position_reward_history
-    step = int(env.common_step_counter)
     _position_tracking_history.append((step, target_pose[0].cpu().numpy(), ee_pose[0].cpu().numpy()))
     _position_reward_history.append((step, reward[0].item()))
 
+    # -------- console log every 10 steps --------
+    if step % 10 == 0:
+        mean_e_pose = torch.mean(torch.abs(e_pose), dim=0).cpu().numpy()
+        mean_r_pose = torch.mean(r_pose_axiswise, dim=0).cpu().numpy()
+        print(f"[Position Step {step:>5}] mean(|e_pose|)={torch.norm(e_pose, dim=1).mean():.4f}, total_reward={reward.mean():.4f}")
+        labels = ["x", "y", "z", "roll", "pitch", "yaw"]
+        for i in range(6):
+            print(
+                f"  {labels[i]:<6} | current={ee_pose[0,i]:+9.4f} | "
+                f"target={target_pose[0,i]:+9.4f} | "
+                f"error={mean_e_pose[i]:+9.4f} | "
+                f"r_axis={mean_r_pose[i]:.4f}"
+            )
+
+
+    # Visualization
+    if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
+        episode_steps = int(env.max_episode_length)
+        if step > 0 and (step % episode_steps == episode_steps - 1):
+            save_episode_plots_position(step)
+
     return reward
-
-
-
-
 
 
 # -----------------------------------------------------------
@@ -190,52 +169,44 @@ def save_episode_plots_joint(step: int):
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(reward_dir, exist_ok=True)
 
-    # -------------------------------
-    # (1) Joint Tracking Plot
-    # -------------------------------
     steps, targets, currents = zip(*_joint_tracking_history)
     targets, currents = np.vstack(targets), np.vstack(currents)
-    colors = ["r", "g", "b", "orange", "purple", "gray"]
+    colors = ["r","g","b","orange","purple","gray"]
 
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(10,6))
     for j in range(targets.shape[1]):
-        plt.plot(targets[:, j], "--", color=colors[j], label=f"Target q{j+1}")
-        plt.plot(currents[:, j], "-", color=colors[j], label=f"Current q{j+1}")
+        plt.plot(targets[:,j],"--",color=colors[j],label=f"Target q{j+1}")
+        plt.plot(currents[:,j],"-",color=colors[j],label=f"Current q{j+1}")
     plt.legend(); plt.grid(True)
-    plt.title("Joint Tracking (v20.1)")
+    plt.title("Joint Tracking (v21)")
     plt.xlabel("Step"); plt.ylabel("Joint [rad]")
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"joint_tracking_v20_ep{_episode_counter_joint+1}.png"))
+    plt.savefig(os.path.join(save_dir, f"joint_tracking_v21_ep{_episode_counter_joint+1}.png"))
     plt.close()
 
-    # -------------------------------
-    # (2) Reward Visualization
-    # -------------------------------
     r_steps, r_values = zip(*_joint_reward_history)
     r_values = np.vstack(r_values)
     total_reward = np.sum(r_values, axis=1)
 
     def smooth(y, window=50):
-        if len(y) < window:
-            return y
+        if len(y) < window: return y
         cumsum = np.cumsum(np.insert(y, 0, 0))
         return (cumsum[window:] - cumsum[:-window]) / window
 
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(10,6))
     for j in range(r_values.shape[1]):
-        smooth_y = smooth(r_values[:, j])
+        smooth_y = smooth(r_values[:,j])
         smooth_x = np.linspace(r_steps[0], r_steps[-1], len(smooth_y))
         plt.plot(smooth_x, smooth_y, color=colors[j], label=f"r_pose(q{j+1})")
 
     smooth_total = smooth(total_reward)
     smooth_x_total = np.linspace(r_steps[0], r_steps[-1], len(smooth_total))
     plt.plot(smooth_x_total, smooth_total, color="black", linewidth=2.5, label="Total Reward")
-
     plt.legend(); plt.grid(True)
-    plt.title("Per-Joint Reward + Total Reward (v20.1)")
+    plt.title("Per-Joint Reward + Total Reward (v21)")
     plt.xlabel("Step"); plt.ylabel("Reward")
     plt.tight_layout()
-    plt.savefig(os.path.join(reward_dir, f"r_pose_total_joint_v20_ep{_episode_counter_joint+1}.png"))
+    plt.savefig(os.path.join(reward_dir, f"r_pose_total_joint_v21_ep{_episode_counter_joint+1}.png"))
     plt.close()
 
     _joint_tracking_history.clear()
@@ -255,102 +226,41 @@ def save_episode_plots_position(step: int):
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(reward_dir, exist_ok=True)
 
-    # (1) 6D Pose Tracking (x, y, z, roll, pitch, yaw)
     steps, targets, currents = zip(*_position_tracking_history)
     targets, currents = np.vstack(targets), np.vstack(currents)
+    labels = ["x","y","z","roll","pitch","yaw"]
+    colors = ["r","g","b","orange","purple","gray"]
 
-    labels = ["x", "y", "z", "roll", "pitch", "yaw"]
-    colors = ["r", "g", "b", "orange", "purple", "gray"]
-
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12,8))
     for j in range(6):
-        plt.plot(targets[:, j], "--", color=colors[j], label=f"Target {labels[j]}")
-        plt.plot(currents[:, j], "-", color=colors[j], label=f"Current {labels[j]}")
-    plt.legend(ncol=3)
-    plt.grid(True)
-    plt.title("EE 6D Pose Tracking (v20.1)")
-    plt.xlabel("Step")
-    plt.ylabel("Pose [m / rad]")
+        plt.plot(targets[:,j],"--",color=colors[j],label=f"Target {labels[j]}")
+        plt.plot(currents[:,j],"-",color=colors[j],label=f"Current {labels[j]}")
+    plt.legend(ncol=3); plt.grid(True)
+    plt.title("EE 6D Pose Tracking (v21)")
+    plt.xlabel("Step"); plt.ylabel("Pose [m/rad]")
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"pose_tracking_v20_ep{_episode_counter_position+1}.png"))
+    plt.savefig(os.path.join(save_dir, f"pos_tracking_v21_ep{_episode_counter_position+1}.png"))
     plt.close()
 
-    # (2) Reward Visualization
     r_steps, r_values = zip(*_position_reward_history)
     r_values = np.array(r_values).flatten()
 
     def smooth(y, window=50):
-        if len(y) < window:
-            return y
+        if len(y) < window: return y
         cumsum = np.cumsum(np.insert(y, 0, 0))
         return (cumsum[window:] - cumsum[:-window]) / window
 
     smooth_y = smooth(r_values)
     smooth_x = np.linspace(r_steps[0], r_steps[-1], len(smooth_y))
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(10,5))
     plt.plot(smooth_x, smooth_y, "g", linewidth=2.5, label="r_pose(6D pose)")
-    plt.legend()
-    plt.grid(True)
-    plt.title("6D Pose Reward (v20.1)")
-    plt.xlabel("Step")
-    plt.ylabel("Reward")
+    plt.legend(); plt.grid(True)
+    plt.title("6D Pose Reward (v21)")
+    plt.xlabel("Step"); plt.ylabel("Reward")
     plt.tight_layout()
-    plt.savefig(os.path.join(reward_dir, f"r_pose_total_6D_v20_ep{_episode_counter_position+1}.png"))
+    plt.savefig(os.path.join(reward_dir, f"r_pose_total_pos_v21_ep{_episode_counter_position+1}.png"))
     plt.close()
 
     _position_tracking_history.clear()
     _position_reward_history.clear()
     _episode_counter_position += 1
-
-
-
-# -----------------------------------------------------------
-# (5) Contact Force Reward (unchanged)
-# -----------------------------------------------------------
-def contact_force_reward(env: ManagerBasedRLEnv,
-                         sensor_name="contact_forces",
-                         fz_min=5.0, fz_max=15.0,
-                         margin=2.0, weight=1.0):
-    sensor = env.scene.sensors[sensor_name]
-    forces_w = sensor.data.net_forces_w  # (num_envs, num_bodies, 3)
-    fz = torch.mean(forces_w, dim=1)[:, 2]  # 평균 Fz
-
-    lower_smooth = torch.tanh((fz - fz_min) / margin)
-    upper_smooth = torch.tanh((fz_max - fz) / margin)
-    reward = weight * torch.clamp(0.5 * (lower_smooth + upper_smooth), 0.0, 1.0)
-
-    if env.common_step_counter % 1000 == 0:
-        print(f"[ContactReward] Step {env.common_step_counter}: Fz={fz[0]:.3f}, Reward={reward[0]:.3f}")
-    return reward
-
-
-# -----------------------------------------------------------
-# (6) Camera Distance Reward (unchanged)
-# -----------------------------------------------------------
-def camera_distance_reward(env, target_distance=0.185, sigma=0.02):
-    camera_data = env.scene["camera"].data.output["distance_to_image_plane"]
-    d_mean = torch.mean(camera_data.view(env.num_envs, -1), dim=1)
-    error = torch.abs(d_mean - target_distance)
-    reward = torch.exp(- (error ** 2) / (2 * sigma ** 2))
-
-    if env.common_step_counter % 100 == 0:
-        print(f"[CameraReward] Step {env.common_step_counter}: mean={d_mean[0]:.4f}, reward={reward[0]:.4f}")
-        save_dir = os.path.expanduser("~/nrs_lab2/outputs/png")
-        os.makedirs(save_dir, exist_ok=True)
-        with open(os.path.join(save_dir, f"camera_distance_step{env.common_step_counter}.txt"), "w") as f:
-            f.write(f"Step {env.common_step_counter}, mean_dist={d_mean[0]:.6f}, reward={reward[0]:.6f}\n")
-
-    return reward
-
-
-# -----------------------------------------------------------
-# (7) Termination Condition (unchanged)
-# -----------------------------------------------------------
-def reached_end(env: ManagerBasedRLEnv, command_name=None, asset_cfg=None) -> torch.Tensor:
-    from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import _hdf5_joints
-    if _hdf5_joints is None:
-        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-
-    T = _hdf5_joints.shape[0]
-    return torch.tensor(env.common_step_counter >= (T - 1),
-                        dtype=torch.bool, device=env.device).repeat(env.num_envs)
