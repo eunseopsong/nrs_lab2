@@ -212,7 +212,7 @@ class EventCfg:
 @configclass
 class RewardsCfg:
     joint_tracking_reward = RewTerm(
-        func=local_rewards.joint_tracking_reward,  # 동일 함수명 (v1 내부 구현)
+        func=local_rewards.joint_tracking_reward,
         weight=1.0,
     )
 
