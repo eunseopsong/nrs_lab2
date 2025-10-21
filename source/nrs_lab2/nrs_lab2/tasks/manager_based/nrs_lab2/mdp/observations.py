@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 Observation utilities for UR10e spindle environment.
+Updated for integration with nrs_ik_core (C++ FK module).
 """
 
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
-from nrs_lab2.src.nrs_ik_py_bind import nrs_ik_py as nrs_ik   # ✅ IK 모듈 import
+from nrs_ik_core import IKSolver   # ✅ C++ pybind 모듈로 변경 (nrs_ik_py → nrs_ik_core)
 
 # ------------------------------------------------------
 # Global buffers
@@ -67,50 +68,6 @@ def get_hdf5_target_future(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Te
     future_idx = torch.clamp(torch.arange(idx, idx + horizon), max=T - 1)
     future_targets = _hdf5_trajectory[future_idx].reshape(1, horizon * D)
     return future_targets.repeat(env.num_envs, 1)
-
-
-# ------------------------------------------------------
-# ✅ Observation: End-Effector Position / Velocity (using nrs_ik)
-# ------------------------------------------------------
-def get_ee_observation(env: ManagerBasedRLEnv, tool_z: float = 0.239, use_degrees: bool = False):
-    """
-    Compute End-Effector position and velocity for each env using nrs_ik_py.
-
-    Returns:
-        (num_envs, 6) tensor = [x, y, z, vx, vy, vz]
-    """
-    robot = env.scene["robot"]
-    q = robot.data.joint_pos
-    qd = robot.data.joint_vel
-    num_envs, n_dof = q.shape
-
-    solver = nrs_ik.IKSolver(tool_z, use_degrees)
-    ee_pos = torch.zeros((num_envs, 3), device=q.device)
-    ee_vel = torch.zeros((num_envs, 3), device=q.device)
-
-    for i in range(num_envs):
-        # --- Forward kinematics (pose)
-        ok, pose = solver.forward(q[i].tolist())
-        if ok:
-            ee_pos[i] = torch.tensor(pose[:3], dtype=torch.float32, device=q.device)
-
-        # --- Linear velocity (Jacobian * qdot)
-        try:
-            J = solver.get_jacobian(q[i].tolist())   # shape (6, 6)
-            J = torch.tensor(J, dtype=torch.float32, device=q.device)
-            v = J @ qd[i]
-            ee_vel[i] = v[:3]
-        except AttributeError:
-            # Jacobian 미구현 시 0으로 반환
-            ee_vel[i] = torch.zeros(3, device=q.device)
-
-    # --- Debug print
-    if env.common_step_counter % 100 == 0:
-        x, y, z = ee_pos[0].tolist()
-        vx, vy, vz = ee_vel[0].tolist()
-        print(f"[EE DEBUG] step={env.common_step_counter} pos=({x:.3f},{y:.3f},{z:.3f}), vel=({vx:.3f},{vy:.3f},{vz:.3f})")
-
-    return torch.cat([ee_pos, ee_vel], dim=-1)  # (num_envs, 6)
 
 
 # ------------------------------------------------------

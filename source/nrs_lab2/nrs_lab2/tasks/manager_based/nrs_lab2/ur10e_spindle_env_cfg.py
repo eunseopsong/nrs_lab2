@@ -65,8 +65,6 @@ local_rewards = importlib.import_module(
 # Robot and sensor assets
 from assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
 
-# pybind
-from nrs_lab2.src.nrs_ik_py_bind import nrs_ik_py as nrs_ik
 
 # -----------------------------------------------------------------------------
 # Scene Configuration
