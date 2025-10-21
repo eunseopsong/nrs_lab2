@@ -30,14 +30,14 @@ class PolishingPoseHoldEnvCfg(UR10eSpindleEnvCfg):
         self.episode_length_s = 60.0
 
         # 🔹 HDF5 trajectory (joints)
-        self.events.load_hdf5_joints = EventTerm(
-            func=local_obs.load_hdf5_joints,
-            mode="reset",
-            params={
-                "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.h5",
-                "dataset_key": "target_joints",
-            },
-        )
+        # self.events.load_hdf5_joints = EventTerm(
+        #     func=local_obs.load_hdf5_joints,
+        #     mode="reset",
+        #     params={
+        #         "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.h5",
+        #         "dataset_key": "target_joints",
+        #     },
+        # )
 
         # 🔹 HDF5 trajectory (positions)
         self.events.load_hdf5_positions = EventTerm(
