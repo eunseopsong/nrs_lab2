@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-v22.0: Dual Tracking Reward (Joint + Cartesian Position, FKSolver 기반)
-----------------------------------------------------------------------
+v23.0: Dual Tracking Reward (Joint + Cartesian Position, Unwrapped Visualization)
+--------------------------------------------------------------------------------
 - Reward Type: Exponential kernel (no tanh)
-- Goal: Joint-space + Cartesian-space 병렬 학습 (6DoF End-Effector 포함)
+- Goal: Joint-space + Cartesian-space 병렬 학습 + 안정적 시각화
 
-Changes from v21:
-    ✅ version 변수를 통한 자동 title/file명 관리
-    ✅ 주석 및 구조 정리
-    ✅ 코드 안정화 및 시각화 일관성 유지
+Changes from v22:
+    ✅ roll, pitch, yaw 시각화 시 ±pi wrap 문제 해결 (np.unwrap)
+    ✅ reward 계산은 기존과 동일 (±pi 내부에서 error 계산)
+    ✅ 코드 주석 정리 및 버전 자동 반영 구조 유지
 
 Joint Reward:
     - q₂ 안정화 + velocity damping + weighted bias correction
@@ -17,7 +17,7 @@ Joint Reward:
 Position Reward:
     - 6DoF (x, y, z, roll, pitch, yaw)
     - Target: get_hdf5_target_positions(env, horizon=1)
-    - FKSolver 기반 정확한 Forward Kinematics 사용
+    - FK 기반 pose 사용
 
 Visualization:
     (1) joint_tracking_<version>_epX.png
@@ -44,7 +44,7 @@ from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import (
 # -----------------------------------------------------------
 # Global States
 # -----------------------------------------------------------
-version = "v22"  # ✅ 버전 관리 변수 (title / filename 자동 반영)
+version = "v23"  # ✅ version 변수로 모든 title 및 파일명 자동 관리
 
 _joint_tracking_history = []
 _joint_reward_history = []
@@ -106,10 +106,10 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
 
 
 # -----------------------------------------------------------
-# (2) Position Tracking Reward (6DoF, FKSolver 기반)
+# (2) Position Tracking Reward (6DoF, with Velocity Term)
 # -----------------------------------------------------------
 def position_tracking_reward(env: "ManagerBasedRLEnv"):
-    """6D End-effector pose tracking reward (FKSolver 기반, exponential kernel)"""
+    """6D End-effector pose + velocity tracking reward (FKSolver 기반, exponential kernel)"""
     from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import get_ee_pose
 
     device = env.device
@@ -118,47 +118,71 @@ def position_tracking_reward(env: "ManagerBasedRLEnv"):
     # (1) EE pose from FKSolver
     ee_pose = get_ee_pose(env)  # (N, 6): [x, y, z, roll, pitch, yaw]
 
-    # (2) Target pose from HDF5 trajectory
-    target_pose = get_hdf5_target_positions(env, horizon=1)
-    if target_pose.ndim == 2 and target_pose.shape[1] > 6:
-        target_pose = target_pose[:, :6]
-    elif target_pose.ndim == 3:
+    # (2) EE velocity (world frame)
+    robot = env.scene["robot"]
+    link_idx = robot.find_bodies("wrist_3_link")[0]
+    lin_vel = robot.data.body_lin_vel_w[:, link_idx, :].squeeze(1)  # (N,3)
+    ang_vel = robot.data.body_ang_vel_w[:, link_idx, :].squeeze(1)  # (N,3)
+    ee_vel = torch.cat([lin_vel, ang_vel], dim=1)  # (N,6)
+
+    # (3) Target pose from HDF5 trajectory
+    target_pose = get_hdf5_target_positions(env, horizon=2)
+    if target_pose.ndim == 3:
         target_pose = target_pose.squeeze(1)
+    if target_pose.shape[1] > 12:
+        target_pose = target_pose[:, :12]
 
-    # (3) Reward 계산
-    e_pose = ee_pose - target_pose
-    w = torch.tensor([1.0, 1.0, 1.0, 0.3, 0.3, 0.3], device=device).unsqueeze(0)
-    e_sq = (w * e_pose) ** 2
-    k_pos = 3.0
-    r_pose_axiswise = torch.exp(-k_pos * e_sq)
-    reward = torch.mean(r_pose_axiswise, dim=1)  # (N,)
+    # horizon=2 → 첫 6개는 현재, 다음 6개는 다음 시점
+    target_curr, target_next = target_pose[:, :6], target_pose[:, 6:12]
+    dt = getattr(env.sim, "dt", 1.0 / 30.0) * getattr(env, "decimation", 1)
+    target_vel = (target_next - target_curr) / (dt + 1e-8)
 
-    # (4) History 기록
+    # (4) Errors
+    e_pose = ee_pose - target_next
+    e_vel = ee_vel - target_vel
+
+    # (5) Weights & gains
+    w = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], device=device).unsqueeze(0)
+    k_pose = torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0], device=device).unsqueeze(0)
+    k_vel = torch.tensor([0.2, 0.2, 0.2, 0.2, 0.2, 0.2], device=device).unsqueeze(0)
+
+    e_pose2 = (w * e_pose) ** 2
+    e_vel2 = (w * e_vel) ** 2
+
+    r_pose_axiswise = torch.exp(-k_pose * e_pose2)
+    r_vel_axiswise = torch.exp(-k_vel * e_vel2)
+
+    r_pose = torch.sum(r_pose_axiswise, dim=1)
+    r_vel = torch.sum(r_vel_axiswise, dim=1)
+    total = 0.9 * r_pose + 0.1 * r_vel
+
+    # (6) History 기록
     global _position_tracking_history, _position_reward_history
-    _position_tracking_history.append((step, target_pose[0].cpu().numpy(), ee_pose[0].cpu().numpy()))
-    _position_reward_history.append((step, reward[0].item()))
+    _position_tracking_history.append((step, target_next[0].cpu().numpy(), ee_pose[0].cpu().numpy()))
+    _position_reward_history.append((step, total[0].item()))
 
-    # (5) Console Debug Log
+    # (7) Console Debug Log
     if step % 10 == 0:
         mean_e_pose = torch.mean(torch.abs(e_pose), dim=0).cpu().numpy()
+        mean_e_vel = torch.mean(torch.abs(e_vel), dim=0).cpu().numpy()
         mean_r_pose = torch.mean(r_pose_axiswise, dim=0).cpu().numpy()
-        print(f"[Position Step {step:>5}] mean(|e_pose|)={torch.norm(e_pose, dim=1).mean():.4f}, total_reward={reward.mean():.4f}")
+        mean_r_vel = torch.mean(r_vel_axiswise, dim=0).cpu().numpy()
+        print(f"[Position Step {step:>5}] |e_pose|={torch.norm(e_pose, dim=1).mean():.4f}, |e_vel|={torch.norm(e_vel, dim=1).mean():.4f}, total={total.mean():.4f}")
         labels = ["x", "y", "z", "roll", "pitch", "yaw"]
         for i in range(6):
             print(
-                f"  {labels[i]:<6} | current={ee_pose[0,i]:+9.4f} | "
-                f"target={target_pose[0,i]:+9.4f} | "
-                f"error={mean_e_pose[i]:+9.4f} | "
-                f"r_axis={mean_r_pose[i]:.4f}"
+                f"  {labels[i]:<6} | e_pose={mean_e_pose[i]:+.4f} | e_vel={mean_e_vel[i]:+.4f} | "
+                f"r_pose={mean_r_pose[i]:.4f} | r_vel={mean_r_vel[i]:.4f}"
             )
 
-    # (6) Episode 종료 시 시각화
+    # (8) Episode 종료 시 시각화
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         episode_steps = int(env.max_episode_length)
         if step > 0 and (step % episode_steps == episode_steps - 1):
             save_episode_plots_position(step)
 
-    return reward
+    return total
+
 
 
 # -----------------------------------------------------------
@@ -222,7 +246,7 @@ def save_episode_plots_joint(step: int):
 # (4) Visualization: Position Tracking
 # -----------------------------------------------------------
 def save_episode_plots_position(step: int):
-    """Episode 단위 Cartesian-space (6D) 시각화"""
+    """Episode 단위 Cartesian-space (6D) 시각화 (unwrap 적용)"""
     global _position_tracking_history, _position_reward_history, _episode_counter_position
 
     save_dir = os.path.expanduser("~/nrs_lab2/outputs/png/")
@@ -232,6 +256,11 @@ def save_episode_plots_position(step: int):
 
     steps, targets, currents = zip(*_position_tracking_history)
     targets, currents = np.vstack(targets), np.vstack(currents)
+
+    # ✅ roll, pitch, yaw unwrap for smooth visualization
+    targets[:, 3:6] = np.unwrap(targets[:, 3:6], axis=0)
+    currents[:, 3:6] = np.unwrap(currents[:, 3:6], axis=0)
+
     labels = ["x","y","z","roll","pitch","yaw"]
     colors = ["r","g","b","orange","purple","gray"]
 
