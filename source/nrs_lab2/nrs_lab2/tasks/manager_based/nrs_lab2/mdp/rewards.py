@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-v25.0: Dual Tracking Reward (Joint + Cartesian, Wrap-Safe Orientation)
------------------------------------------------------------------------
+v26.0: Dual Tracking Reward (Joint + Cartesian, Wrap-Safe + Unwrap Visualization)
+----------------------------------------------------------------------------------
 - Reward Type: Exponential kernel (no tanh)
 - Goal: Joint-space + Cartesian-space 병렬 학습 + Orientation wrap-safe error 계산
+        + 시각화 시 np.unwrap 적용 (roll/pitch/yaw 연속 표시)
 
-Changes from v24:
-    ✅ Orientation (roll/pitch/yaw) error 계산 시 wrap-around 보정 추가
-       → angle_diff() 함수를 통해 ±π 경계에서 연속적 오차 계산
-    ✅ FK 기반 EE pose/velocity tracking 유지
-    ✅ 시각화(np.unwrap) 유지
-    ✅ version 변수 자동 반영 구조 유지
+Changes from v25:
+    ✅ Reward 계산 시 angle_diff()로 orientation wrap-safe 유지
+    ✅ Visualization 시 np.unwrap()으로 그래프 연속성 확보
+    ✅ 기타 로직 동일
 
 Joint Reward:
     - q₂ 안정화 + velocity damping + weighted bias correction
@@ -49,7 +48,7 @@ from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import (
 # -----------------------------------------------------------
 # Global
 # -----------------------------------------------------------
-version = "v25"
+version = "v26"
 _joint_tracking_history = []
 _joint_reward_history = []
 _position_tracking_history = []
@@ -226,6 +225,11 @@ def save_episode_plots_position(step: int):
 
     steps, targets, currents = zip(*_position_tracking_history)
     targets, currents = np.vstack(targets), np.vstack(currents)
+
+    # ✅ unwrap only for roll, pitch, yaw
+    targets[:, 3:6]  = np.unwrap(targets[:, 3:6], axis=0)
+    currents[:, 3:6] = np.unwrap(currents[:, 3:6], axis=0)
+
     labels = ["x","y","z","roll","pitch","yaw"]
     colors = ["r","g","b","orange","purple","gray"]
 
