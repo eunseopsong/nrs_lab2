@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 Observation utilities for UR10e spindle environment.
-- Integrated with nrs_ik_core (C++ FK module)
+- Integrated with nrs_fk_core (C++ FK module)
 - Horizon-based trajectory loaders (joints / positions)
 - Includes EE pose (x, y, z, roll, pitch, yaw), contact, and camera sensors
 """
 
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
-from nrs_ik_core import IKSolver  # ✅ pybind11 기반 C++ 모듈
+
+# ✅ 조건부 import (중복 등록 방지)
+import sys
+if "nrs_fk_core" not in sys.modules:
+    from nrs_fk_core import FKSolver
+else:
+    FKSolver = sys.modules["nrs_fk_core"].FKSolver
 
 
 # ------------------------------------------------------
@@ -19,54 +25,33 @@ _hdf5_positions = None
 _step_idx = 0
 
 
-
-# ------------------------------------------------------
-# Quaternion → Euler XYZ 변환 (roll, pitch, yaw)
-# ------------------------------------------------------
-def quat_to_euler_xyz(quat: torch.Tensor) -> torch.Tensor:
-    """
-    Convert quaternion (x, y, z, w) → Euler angles (roll, pitch, yaw)
-    - Input: (N, 4)
-    - Output: (N, 3)
-    """
-    x, y, z, w = quat.unbind(-1)
-
-    t0 = 2.0 * (w * x + y * z)
-    t1 = 1.0 - 2.0 * (x * x + y * y)
-    roll = torch.atan2(t0, t1)
-
-    t2 = 2.0 * (w * y - z * x)
-    t2 = torch.clamp(t2, -1.0, 1.0)
-    pitch = torch.asin(t2)
-
-    t3 = 2.0 * (w * z + x * y)
-    t4 = 1.0 - 2.0 * (y * y + z * z)
-    yaw = torch.atan2(t3, t4)
-
-    return torch.stack((roll, pitch, yaw), dim=-1)
-
-
 # ------------------------------------------------------
 # ✅ EE pose observation (x, y, z, roll, pitch, yaw)
 # ------------------------------------------------------
-def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot", frame_name: str = "wrist_3_link"):
-    """Returns end-effector pose (x, y, z, roll, pitch, yaw)."""
+def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot"):
+    """
+    Returns end-effector pose (x, y, z, roll, pitch, yaw)
+    -----------------------------------------------------
+    - 현재 로봇의 joint 상태(q1~q6)를 불러와서
+      FKSolver를 이용해 FK 계산 수행
+    - FK 결과는 torch.Tensor (num_envs, 6) 형태로 반환
+    """
     robot = env.scene[asset_name]
-    link_indices = robot.find_bodies(frame_name)
-    if len(link_indices) == 0:
-        raise ValueError(f"[ERROR] Link '{frame_name}' not found in robot asset.")
-    idx = link_indices[0]
+    q = robot.data.joint_pos[:, :6]  # (num_envs, 6)
+    num_envs = q.shape[0]
 
-    ee_pos = robot.data.body_pos_w[:, idx, :]    # (num_envs, 3)
-    ee_quat = robot.data.body_quat_w[:, idx, :]  # (num_envs, 4)
-    ee_rpy = quat_to_euler_xyz(ee_quat)          # (num_envs, 3)
+    fk_solver = FKSolver(tool_z=0.239, use_degrees=False)
+    ee_pose_list = []
 
-    # ✅ 강제로 (num_envs, 6) 형태 보장
-    ee_pose = torch.cat([ee_pos, ee_rpy], dim=-1)
-    if ee_pose.ndim == 3:
-        ee_pose = ee_pose.squeeze(1)
-    elif ee_pose.ndim == 1:
-        ee_pose = ee_pose.unsqueeze(0)
+    for i in range(num_envs):
+        q_np = q[i].cpu().numpy().astype(float)
+        ok, pose = fk_solver.compute(q_np, as_degrees=False)
+        if not ok:
+            ee_pose_list.append([float('nan')]*6)
+        else:
+            ee_pose_list.append([pose.x, pose.y, pose.z, pose.r, pose.p, pose.yaw])
+
+    ee_pose = torch.tensor(ee_pose_list, dtype=torch.float32, device=q.device)
     assert ee_pose.ndim == 2 and ee_pose.shape[1] == 6, f"[EE_POSE] Invalid shape: {ee_pose.shape}"
 
     return ee_pose

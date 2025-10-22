@@ -10,9 +10,10 @@ Manager-based Isaac Lab environment for the UR10e robot equipped with a spindle 
 Key features:
 - Horizon-based joint & position trajectory tracking
 - Exponential-shaped reward for position tracking
-- End-effector position observation (get_ee_pos)
+- End-effector 6D pose observation via FKSolver
 - Contact/camera sensor integration (optional)
 """
+
 
 # -----------------------------------------------------------------------------
 # Imports
@@ -104,8 +105,9 @@ class ObservationsCfg:
         # ✅ EE position (현재 엔드이펙터 위치)
         ee_pose = ObsTerm(
             func=local_obs.get_ee_pose,
-            params={"asset_name": "robot", "frame_name": "wrist_3_link"},
+            params={"asset_name": "robot"},
         )
+
 
         # ✅ HDF5 기반 horizon-length trajectory 관측
         target_joints = ObsTerm(

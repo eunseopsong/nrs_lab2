@@ -16,7 +16,7 @@
 
 Kinematic_func::Kinematic_func()
 {
-	printf("============== Applying UR10e Arm kinematics =================\n");
+	// printf("============== Applying UR10e Arm kinematics =================\n");
 }
 
 // =================== Kinematics and Dynamic parameters independent ===================//
