@@ -1,38 +1,34 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-v24.0: Dual Tracking Reward (Joint + Cartesian Position/Velocity, Unwrapped Visualization)
-------------------------------------------------------------------------------------------
+v25.0: Dual Tracking Reward (Joint + Cartesian, Wrap-Safe Orientation)
+-----------------------------------------------------------------------
 - Reward Type: Exponential kernel (no tanh)
-- Goal: Joint-space + Cartesian-space 병렬 학습 + 안정적 시각화 및 속도 일관성 강화
+- Goal: Joint-space + Cartesian-space 병렬 학습 + Orientation wrap-safe error 계산
 
-Changes from v23:
-    ✅ Position tracking reward에 velocity term 추가 (r_pose + r_vel)
-    ✅ End-effector linear & angular velocity 기반 보상 추가
-    ✅ roll, pitch, yaw 시각화 시 ±pi wrap 문제 해결 유지 (np.unwrap)
-    ✅ version 변수로 파일명/타이틀 자동 반영 유지
+Changes from v24:
+    ✅ Orientation (roll/pitch/yaw) error 계산 시 wrap-around 보정 추가
+       → angle_diff() 함수를 통해 ±π 경계에서 연속적 오차 계산
+    ✅ FK 기반 EE pose/velocity tracking 유지
+    ✅ 시각화(np.unwrap) 유지
+    ✅ version 변수 자동 반영 구조 유지
 
 Joint Reward:
     - q₂ 안정화 + velocity damping + weighted bias correction
     - Target: get_hdf5_target_joints(env, horizon=8)
-    - Output: r_pose_jointwise, r_vel_jointwise → total = 0.9*r_pose + 0.1*r_vel
+    - Output: total = 0.9 * r_pose + 0.1 * r_vel
 
 Position Reward:
     - 6DoF (x, y, z, roll, pitch, yaw) + 6D velocity (vx, vy, vz, wx, wy, wz)
     - Target: get_hdf5_target_positions(env, horizon=2)
-    - FK 기반 pose 및 linear/angular velocity 이용
-    - Output: r_pose_axiswise, r_vel_axiswise → total = 0.9*r_pose + 0.1*r_vel
+    - Orientation error wrap-safe 계산
+    - Output: total = 0.9 * r_pose + 0.1 * r_vel
 
 Visualization:
     (1) joint_tracking_<version>_epX.png
     (2) pos_tracking_<version>_epX.png
     (3) r_pose_total_joint_<version>_epX.png
     (4) r_pose_total_pos_<version>_epX.png
-
-Note:
-    - reward 계산 시 ±pi wrap 문제는 영향 없음
-    - 시각화 단계에서 np.unwrap() 적용으로 그래프 연속성 확보
 """
-
 
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -47,19 +43,28 @@ import matplotlib.pyplot as plt
 from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import (
     get_hdf5_target_joints,
     get_hdf5_target_positions,
+    get_ee_pose,
 )
 
 # -----------------------------------------------------------
-# Global States
+# Global
 # -----------------------------------------------------------
-version = "v24"  # ✅ version 변수로 모든 title 및 파일명 자동 관리
-
+version = "v25"
 _joint_tracking_history = []
 _joint_reward_history = []
 _position_tracking_history = []
 _position_reward_history = []
 _episode_counter_joint = 0
 _episode_counter_position = 0
+
+
+# -----------------------------------------------------------
+# Utility: angle wrap correction
+# -----------------------------------------------------------
+def angle_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Compute minimal difference between two angles (in radians), wrapped to [-pi, pi]."""
+    diff = (a - b + np.pi) % (2 * np.pi) - np.pi
+    return diff
 
 
 # -----------------------------------------------------------
@@ -73,15 +78,12 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     D = q.shape[1]
     step = int(env.common_step_counter)
 
-    # Horizon-based target
     fut = get_hdf5_target_joints(env, horizon=8)
     q_star_curr, q_star_next = fut[:, :D], fut[:, D:2*D]
     qd_star = (q_star_next - q_star_curr) / (dt + 1e-8)
 
-    # Errors
     e_q, e_qd = q - q_star_next, qd - qd_star
 
-    # Weights & gains
     wj = torch.tensor([1, 2.0, 1, 4.0, 1, 1], device=q.device).unsqueeze(0)
     k_pos = torch.tensor([1.0, 8.0, 2.0, 6.0, 2.0, 2.0], device=q.device).unsqueeze(0)
     k_vel = torch.tensor([0.10, 0.40, 0.10, 0.40, 0.10, 0.10], device=q.device).unsqueeze(0)
@@ -89,10 +91,10 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     e_q2, e_qd2 = wj * (e_q ** 2), wj * (e_qd ** 2)
     r_pose_jointwise = torch.exp(-k_pos * e_q2)
     r_vel_jointwise = torch.exp(-k_vel * e_qd2)
+
     r_pose, r_vel = r_pose_jointwise.sum(dim=1), r_vel_jointwise.sum(dim=1)
     total = 0.9 * r_pose + 0.1 * r_vel
 
-    # Console log every 10 steps
     if step % 10 == 0:
         print(f"[Joint Step {step}] mean(e_q)={torch.norm(e_q, dim=1).mean():.3f}, total={total.mean():.3f}")
         mean_e_q_abs = torch.mean(torch.abs(e_q), dim=0).cpu().numpy()
@@ -100,11 +102,9 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
         for j in range(D):
             print(f"  joint{j+1}: |mean(e_q)|={mean_e_q_abs[j]:.3f}, r_pose={mean_r_pose[j]:.3f}")
 
-    # History
     _joint_tracking_history.append((step, q_star_next[0].cpu().numpy(), q[0].cpu().numpy()))
     _joint_reward_history.append((step, r_pose_jointwise[0].cpu().numpy()))
 
-    # Visualization per episode
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         episode_steps = int(env.max_episode_length)
         if step > 0 and (step % episode_steps == episode_steps - 1):
@@ -114,92 +114,72 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
 
 
 # -----------------------------------------------------------
-# (2) Position Tracking Reward (6DoF, with Velocity Term)
+# (2) Position Tracking Reward (6D + velocity)
 # -----------------------------------------------------------
 def position_tracking_reward(env: "ManagerBasedRLEnv"):
-    """6D End-effector pose + velocity tracking reward (FKSolver 기반, exponential kernel)"""
-    from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import get_ee_pose
-
+    """6D EE pose + velocity tracking reward (wrap-safe orientation)"""
     device = env.device
     step = int(env.common_step_counter)
 
-    # (1) EE pose from FKSolver
-    ee_pose = get_ee_pose(env)  # (N, 6): [x, y, z, roll, pitch, yaw]
-
-    # (2) EE velocity (world frame)
+    # (1) FK 기반 EE pose
+    ee_pose = get_ee_pose(env)  # (N,6): [x,y,z,roll,pitch,yaw]
     robot = env.scene["robot"]
-    link_idx = robot.find_bodies("wrist_3_link")[0]
-    lin_vel = robot.data.body_lin_vel_w[:, link_idx, :].squeeze(1)  # (N,3)
-    ang_vel = robot.data.body_ang_vel_w[:, link_idx, :].squeeze(1)  # (N,3)
-    ee_vel = torch.cat([lin_vel, ang_vel], dim=1)  # (N,6)
+    ee_vel = robot.data.body_lin_vel_w[:, robot.find_bodies("wrist_3_link")[0], :].squeeze(1)
+    ee_ang = robot.data.body_ang_vel_w[:, robot.find_bodies("wrist_3_link")[0], :].squeeze(1)
+    ee_vel6d = torch.cat([ee_vel, ee_ang], dim=1)
 
-    # (3) Target pose from HDF5 trajectory
-    target_pose = get_hdf5_target_positions(env, horizon=2)
-    if target_pose.ndim == 3:
-        target_pose = target_pose.squeeze(1)
-    if target_pose.shape[1] > 12:
-        target_pose = target_pose[:, :12]
+    # (2) HDF5 target (2-step horizon)
+    fut = get_hdf5_target_positions(env, horizon=2)
+    if fut.ndim == 3: fut = fut.squeeze(1)
+    target_curr, target_next = fut[:, :6], fut[:, 6:12]
+    target_vel = (target_next - target_curr) / (1.0 / 30.0)
 
-    # horizon=2 → 첫 6개는 현재, 다음 6개는 다음 시점
-    target_curr, target_next = target_pose[:, :6], target_pose[:, 6:12]
-    dt = getattr(env.sim, "dt", 1.0 / 30.0) * getattr(env, "decimation", 1)
-    target_vel = (target_next - target_curr) / (dt + 1e-8)
+    # (3) wrap-safe orientation difference
+    e_pose = ee_pose.clone()
+    e_pose[:, :3] -= target_next[:, :3]
+    diff_ori = angle_diff(ee_pose[:, 3:6].cpu().numpy(), target_next[:, 3:6].cpu().numpy())
+    e_pose[:, 3:6] = torch.from_numpy(diff_ori).to(device)
 
-    # (4) Errors
-    e_pose = ee_pose - target_next
-    e_vel = ee_vel - target_vel
+    # (4) velocity error
+    e_vel = ee_vel6d - target_vel
 
-    # (5) Weights & gains
-    w = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], device=device).unsqueeze(0)
-    k_pose = torch.tensor([8.0, 8.0, 8.0, 8.0, 8.0, 8.0], device=device).unsqueeze(0)
-    k_vel = torch.tensor([0.2, 0.2, 0.2, 0.2, 0.2, 0.2], device=device).unsqueeze(0)
+    # (5) reward
+    w = torch.tensor([1,1,1,0.3,0.3,0.3], device=device).unsqueeze(0)
+    k_pose, k_vel = 3.0, 1.0
+    r_pose_axiswise = torch.exp(-k_pose * (w * e_pose) ** 2)
+    r_vel_axiswise  = torch.exp(-k_vel  * (w * e_vel) ** 2)
+    r_pose, r_vel = torch.mean(r_pose_axiswise, dim=1), torch.mean(r_vel_axiswise, dim=1)
+    reward = 0.9 * r_pose + 0.1 * r_vel
 
-    e_pose2 = (w * e_pose) ** 2
-    e_vel2 = (w * e_vel) ** 2
-
-    r_pose_axiswise = torch.exp(-k_pose * e_pose2)
-    r_vel_axiswise = torch.exp(-k_vel * e_vel2)
-
-    r_pose = torch.sum(r_pose_axiswise, dim=1)
-    r_vel = torch.sum(r_vel_axiswise, dim=1)
-    total = 0.9 * r_pose + 0.1 * r_vel
-
-    # (6) History 기록
+    # (6) 기록 및 로그
     global _position_tracking_history, _position_reward_history
     _position_tracking_history.append((step, target_next[0].cpu().numpy(), ee_pose[0].cpu().numpy()))
-    _position_reward_history.append((step, total[0].item()))
+    _position_reward_history.append((step, reward[0].item()))
 
-    # (7) Console Debug Log
     if step % 10 == 0:
         mean_e_pose = torch.mean(torch.abs(e_pose), dim=0).cpu().numpy()
-        mean_e_vel = torch.mean(torch.abs(e_vel), dim=0).cpu().numpy()
+        mean_e_vel  = torch.mean(torch.abs(e_vel), dim=0).cpu().numpy()
         mean_r_pose = torch.mean(r_pose_axiswise, dim=0).cpu().numpy()
-        mean_r_vel = torch.mean(r_vel_axiswise, dim=0).cpu().numpy()
-        print(f"[Position Step {step:>5}] |e_pose|={torch.norm(e_pose, dim=1).mean():.4f}, |e_vel|={torch.norm(e_vel, dim=1).mean():.4f}, total={total.mean():.4f}")
-        labels = ["x", "y", "z", "roll", "pitch", "yaw"]
+        mean_r_vel  = torch.mean(r_vel_axiswise, dim=0).cpu().numpy()
+        print(f"[Position Step {step}] |e_pose|={torch.norm(e_pose,dim=1).mean():.4f}, |e_vel|={torch.norm(e_vel,dim=1).mean():.4f}, total={reward.mean():.4f}")
+        labels = ["x","y","z","roll","pitch","yaw"]
         for i in range(6):
-            print(
-                f"  {labels[i]:<6} | e_pose={mean_e_pose[i]:+.4f} | e_vel={mean_e_vel[i]:+.4f} | "
-                f"r_pose={mean_r_pose[i]:.4f} | r_vel={mean_r_vel[i]:.4f}"
-            )
+            print(f"  {labels[i]:<6} | e_pose={mean_e_pose[i]:+6.4f} | e_vel={mean_e_vel[i]:+6.4f} | r_pose={mean_r_pose[i]:.4f} | r_vel={mean_r_vel[i]:.4f}")
 
-    # (8) Episode 종료 시 시각화
+    # (7) 시각화
     if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
         episode_steps = int(env.max_episode_length)
         if step > 0 and (step % episode_steps == episode_steps - 1):
             save_episode_plots_position(step)
 
-    return total
-
+    return reward
 
 
 # -----------------------------------------------------------
-# (3) Visualization: Joint Tracking
+# Visualization (공통)
 # -----------------------------------------------------------
 def save_episode_plots_joint(step: int):
-    """Episode 단위 Joint-space 시각화"""
     global _joint_tracking_history, _joint_reward_history, _episode_counter_joint
-
     save_dir = os.path.expanduser("~/nrs_lab2/outputs/png/")
     reward_dir = os.path.expanduser("~/nrs_lab2/outputs/rewards/")
     os.makedirs(save_dir, exist_ok=True)
@@ -223,23 +203,10 @@ def save_episode_plots_joint(step: int):
     r_steps, r_values = zip(*_joint_reward_history)
     r_values = np.vstack(r_values)
     total_reward = np.sum(r_values, axis=1)
-
-    def smooth(y, window=50):
-        if len(y) < window: return y
-        cumsum = np.cumsum(np.insert(y, 0, 0))
-        return (cumsum[window:] - cumsum[:-window]) / window
-
-    plt.figure(figsize=(10,6))
-    for j in range(r_values.shape[1]):
-        smooth_y = smooth(r_values[:,j])
-        smooth_x = np.linspace(r_steps[0], r_steps[-1], len(smooth_y))
-        plt.plot(smooth_x, smooth_y, color=colors[j], label=f"r_pose(q{j+1})")
-
-    smooth_total = smooth(total_reward)
-    smooth_x_total = np.linspace(r_steps[0], r_steps[-1], len(smooth_total))
-    plt.plot(smooth_x_total, smooth_total, color="black", linewidth=2.5, label="Total Reward")
+    plt.figure(figsize=(10,5))
+    plt.plot(r_steps, total_reward, "k", linewidth=2.0, label="Total Reward")
     plt.legend(); plt.grid(True)
-    plt.title(f"Per-Joint Reward + Total Reward ({version})")
+    plt.title(f"Joint Reward ({version})")
     plt.xlabel("Step"); plt.ylabel("Reward")
     plt.tight_layout()
     plt.savefig(os.path.join(reward_dir, f"r_pose_total_joint_{version}_ep{_episode_counter_joint+1}.png"))
@@ -250,13 +217,8 @@ def save_episode_plots_joint(step: int):
     _episode_counter_joint += 1
 
 
-# -----------------------------------------------------------
-# (4) Visualization: Position Tracking
-# -----------------------------------------------------------
 def save_episode_plots_position(step: int):
-    """Episode 단위 Cartesian-space (6D) 시각화 (unwrap 적용)"""
     global _position_tracking_history, _position_reward_history, _episode_counter_position
-
     save_dir = os.path.expanduser("~/nrs_lab2/outputs/png/")
     reward_dir = os.path.expanduser("~/nrs_lab2/outputs/rewards/")
     os.makedirs(save_dir, exist_ok=True)
@@ -264,11 +226,6 @@ def save_episode_plots_position(step: int):
 
     steps, targets, currents = zip(*_position_tracking_history)
     targets, currents = np.vstack(targets), np.vstack(currents)
-
-    # ✅ roll, pitch, yaw unwrap for smooth visualization
-    targets[:, 3:6] = np.unwrap(targets[:, 3:6], axis=0)
-    currents[:, 3:6] = np.unwrap(currents[:, 3:6], axis=0)
-
     labels = ["x","y","z","roll","pitch","yaw"]
     colors = ["r","g","b","orange","purple","gray"]
 
@@ -285,16 +242,8 @@ def save_episode_plots_position(step: int):
 
     r_steps, r_values = zip(*_position_reward_history)
     r_values = np.array(r_values).flatten()
-
-    def smooth(y, window=50):
-        if len(y) < window: return y
-        cumsum = np.cumsum(np.insert(y, 0, 0))
-        return (cumsum[window:] - cumsum[:-window]) / window
-
-    smooth_y = smooth(r_values)
-    smooth_x = np.linspace(r_steps[0], r_steps[-1], len(smooth_y))
     plt.figure(figsize=(10,5))
-    plt.plot(smooth_x, smooth_y, "g", linewidth=2.5, label="r_pose(6D pose)")
+    plt.plot(r_steps, r_values, "g", linewidth=2.5, label="r_pose(6D pose)")
     plt.legend(); plt.grid(True)
     plt.title(f"6D Pose Reward ({version})")
     plt.xlabel("Step"); plt.ylabel("Reward")
