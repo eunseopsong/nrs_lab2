@@ -144,8 +144,8 @@ def position_tracking_reward(env: "ManagerBasedRLEnv"):
     e_vel = ee_vel6d - target_vel
 
     # (5) reward
-    w = torch.tensor([1,1,1,0.3,0.3,0.3], device=device).unsqueeze(0)
-    k_pose, k_vel = 3.0, 1.0
+    w = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], device=device).unsqueeze(0)
+    k_pose, k_vel = 8.0, 0.2
     r_pose_axiswise = torch.exp(-k_pose * (w * e_pose) ** 2)
     r_vel_axiswise  = torch.exp(-k_vel  * (w * e_vel) ** 2)
     r_pose, r_vel = torch.mean(r_pose_axiswise, dim=1), torch.mean(r_vel_axiswise, dim=1)
