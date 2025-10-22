@@ -1,82 +1,58 @@
-#include <Eigen/Dense>
+#include "fk_solver.h"
 #include <cmath>
-#include <utility>
-#include "Kinematics.h"
-#include "Arm_class.h"
 
-// =============== 헬퍼 함수들 ===============
-static inline Eigen::Matrix<double, 6, 1>
-to_rad(const Eigen::Matrix<double, 6, 1>& q_in, bool use_degrees) {
-    if (!use_degrees) return q_in;
-    constexpr double D2R = M_PI / 180.0;
-    Eigen::Matrix<double, 6, 1> q = q_in;
-    for (int i = 0; i < 6; ++i) q(i) *= D2R;
-    return q;
+using Eigen::Matrix3d;
+using Eigen::Matrix4d;
+using Eigen::Vector3d;
+using Eigen::VectorXd;
+
+FKSolver::FKSolver(double tool_z, bool use_degrees)
+: tool_z_(tool_z), use_degrees_(use_degrees)
+{
+    // Arm_class 내부는 IK에서 이미 초기화되지만, FK에서도 안전하게 기본값 세팅
+    arm_.qc = Eigen::Vector<double, 6>::Zero();
+    arm_.Tc = Matrix4d::Identity();
 }
 
-// ZYX 기준 RPY 추출 (네 Kinematics::Rotation2RPY와 동일 수식)
-static inline Eigen::Vector3d rpy_from_R_zyx(const Eigen::Matrix3d& R) {
-    Eigen::Vector3d rpy;
-    const double yaw = std::atan2(R(1,0), R(0,0));              // Z
-    const double cy  = std::cos(yaw),  sy = std::sin(yaw);
-    const double pitch = std::atan2(-R(2,0), R(0,0)*cy + R(1,0)*sy); // Y
-    const double roll  = std::atan2(-(R(1,2)*cy + R(0,2)*sy),
-                                    (R(1,1)*cy - R(0,1)*sy));       // X
-    rpy << roll, pitch, yaw;
-    return rpy;
+std::pair<bool, PoseRPY>
+FKSolver::compute(const Eigen::Matrix<double,6,1>& q, bool as_degrees)
+{
+    // 1) EE 포즈 계산 (Kinematics의 독립 함수 사용)
+    VectorXd qv(6);
+    for (int i=0; i<6; ++i) qv(i) = q(i);
+
+    Matrix4d T_ee = Matrix4d::Identity();
+    kin_.iForwardK_T(qv, T_ee, /*endlength=*/0.0);   // EE 기준 FK
+
+    // 2) TCP 오프셋(EE->TCP) 적용: IK와 동일 기준 유지
+    Matrix4d EE2TCP = Matrix4d::Identity();
+    EE2TCP(2,3) = tool_z_;
+    Matrix4d T_tcp = T_ee * EE2TCP;
+
+    // 3) ZYX(Rz*Ry*Rx) 정의로 RPY 추출 → IK와 일치
+    Matrix3d R = T_tcp.block<3,3>(0,0);
+    Vector3d rpy;
+    kin_.iRotation2EulerAngle(R, rpy);  // roll=rpy(0), pitch=rpy(1), yaw=rpy(2)
+
+    PoseRPY out;
+    out.x   = T_tcp(0,3);
+    out.y   = T_tcp(1,3);
+    out.z   = T_tcp(2,3);
+    out.r   = rpy(0);
+    out.p   = rpy(1);
+    out.yaw = rpy(2);
+
+    if (as_degrees || use_degrees_) {
+        constexpr double R2D = 180.0 / M_PI;
+        out.r   *= R2D;
+        out.p   *= R2D;
+        out.yaw *= R2D;
+    }
+    return {true, out};
 }
 
-// =============== FKSolver 본체 ===============
-class FKSolver {
-public:
-    FKSolver(double tool_z, bool use_degrees)
-        : tool_z_(tool_z), use_degrees_(use_degrees) {}
-
-    // 4x4 TCP 변환행렬
-    Eigen::Matrix4d transform(const Eigen::Matrix<double, 6, 1>& q_in) const {
-        const auto qrad = to_rad(q_in, use_degrees_);
-
-        // Eigen::VectorXd 로 변환 (Kinematics 시그니처 맞추기)
-        Eigen::VectorXd q(6);
-        for (int i = 0; i < 6; ++i) q(i) = qrad(i);
-
-        // 1) EE 포즈
-        Kinematic_func kin;
-        Eigen::Matrix4d T_ee = Eigen::Matrix4d::Identity();
-        kin.iForwardK_T(q, T_ee, /*endlength*/ 0.0);
-
-        // 2) EE→TCP 오프셋(+Z 방향 tool_z)
-        Eigen::Matrix4d EE2TCP = Eigen::Matrix4d::Identity();
-        EE2TCP(2,3) = tool_z_;
-
-        // 최종 TCP 포즈
-        return T_ee * EE2TCP;
-    }
-
-    // (x,y,z, roll, pitch, yaw) 반환
-    std::pair<bool, Eigen::Matrix<double, 6, 1>>
-    compute(const Eigen::Matrix<double, 6, 1>& q_in, bool as_degrees = false) const {
-        const Eigen::Matrix4d T = transform(q_in);
-
-        if (!T.allFinite()) {
-            return {false, Eigen::Matrix<double, 6, 1>::Zero()};
-        }
-
-        const Eigen::Vector3d p = T.block<3,1>(0,3);
-        const Eigen::Matrix3d R = T.block<3,3>(0,0);
-        Eigen::Vector3d rpy = rpy_from_R_zyx(R);
-
-        Eigen::Matrix<double, 6, 1> out;
-        if (as_degrees) {
-            constexpr double R2D = 180.0 / M_PI;
-            out << p(0), p(1), p(2), rpy(0)*R2D, rpy(1)*R2D, rpy(2)*R2D;
-        } else {
-            out << p(0), p(1), p(2), rpy(0), rpy(1), rpy(2);
-        }
-        return {true, out};
-    }
-
-private:
-    double tool_z_;
-    bool   use_degrees_;
-};
+PoseRPY FKSolver::transform(const Eigen::Matrix<double,6,1>& q, bool as_degrees)
+{
+    auto res = compute(q, as_degrees);
+    return res.first ? res.second : PoseRPY{};
+}
