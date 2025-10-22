@@ -1,30 +1,38 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-v23.0: Dual Tracking Reward (Joint + Cartesian Position, Unwrapped Visualization)
---------------------------------------------------------------------------------
+v24.0: Dual Tracking Reward (Joint + Cartesian Position/Velocity, Unwrapped Visualization)
+------------------------------------------------------------------------------------------
 - Reward Type: Exponential kernel (no tanh)
-- Goal: Joint-space + Cartesian-space 병렬 학습 + 안정적 시각화
+- Goal: Joint-space + Cartesian-space 병렬 학습 + 안정적 시각화 및 속도 일관성 강화
 
-Changes from v22:
-    ✅ roll, pitch, yaw 시각화 시 ±pi wrap 문제 해결 (np.unwrap)
-    ✅ reward 계산은 기존과 동일 (±pi 내부에서 error 계산)
-    ✅ 코드 주석 정리 및 버전 자동 반영 구조 유지
+Changes from v23:
+    ✅ Position tracking reward에 velocity term 추가 (r_pose + r_vel)
+    ✅ End-effector linear & angular velocity 기반 보상 추가
+    ✅ roll, pitch, yaw 시각화 시 ±pi wrap 문제 해결 유지 (np.unwrap)
+    ✅ version 변수로 파일명/타이틀 자동 반영 유지
 
 Joint Reward:
     - q₂ 안정화 + velocity damping + weighted bias correction
     - Target: get_hdf5_target_joints(env, horizon=8)
+    - Output: r_pose_jointwise, r_vel_jointwise → total = 0.9*r_pose + 0.1*r_vel
 
 Position Reward:
-    - 6DoF (x, y, z, roll, pitch, yaw)
-    - Target: get_hdf5_target_positions(env, horizon=1)
-    - FK 기반 pose 사용
+    - 6DoF (x, y, z, roll, pitch, yaw) + 6D velocity (vx, vy, vz, wx, wy, wz)
+    - Target: get_hdf5_target_positions(env, horizon=2)
+    - FK 기반 pose 및 linear/angular velocity 이용
+    - Output: r_pose_axiswise, r_vel_axiswise → total = 0.9*r_pose + 0.1*r_vel
 
 Visualization:
     (1) joint_tracking_<version>_epX.png
     (2) pos_tracking_<version>_epX.png
     (3) r_pose_total_joint_<version>_epX.png
     (4) r_pose_total_pos_<version>_epX.png
+
+Note:
+    - reward 계산 시 ±pi wrap 문제는 영향 없음
+    - 시각화 단계에서 np.unwrap() 적용으로 그래프 연속성 확보
 """
+
 
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -44,7 +52,7 @@ from nrs_lab2.nrs_lab2.tasks.manager_based.nrs_lab2.mdp.observations import (
 # -----------------------------------------------------------
 # Global States
 # -----------------------------------------------------------
-version = "v23"  # ✅ version 변수로 모든 title 및 파일명 자동 관리
+version = "v24"  # ✅ version 변수로 모든 title 및 파일명 자동 관리
 
 _joint_tracking_history = []
 _joint_reward_history = []
@@ -143,7 +151,7 @@ def position_tracking_reward(env: "ManagerBasedRLEnv"):
 
     # (5) Weights & gains
     w = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], device=device).unsqueeze(0)
-    k_pose = torch.tensor([4.0, 4.0, 4.0, 4.0, 4.0, 4.0], device=device).unsqueeze(0)
+    k_pose = torch.tensor([8.0, 8.0, 8.0, 8.0, 8.0, 8.0], device=device).unsqueeze(0)
     k_vel = torch.tensor([0.2, 0.2, 0.2, 0.2, 0.2, 0.2], device=device).unsqueeze(0)
 
     e_pose2 = (w * e_pose) ** 2
