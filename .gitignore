@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 로그 / 결과 / 데이터 / 모델 제외
 logs/
 outputs/
@@ -10,3 +11,9 @@ checkpoints/
 !.gitattributes
 !.gitmodules
 
+=======
+logs/
+outputs/
+datasets/
+.*/
+>>>>>>> origin/main

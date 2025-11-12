@@ -4,8 +4,6 @@
 ACT training script (for offline UR10e dataset)
 """
 
-
-
 import os
 import pickle
 import argparse
