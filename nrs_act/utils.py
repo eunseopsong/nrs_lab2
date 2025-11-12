@@ -258,3 +258,25 @@ def detach_dict(d):
 def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+
+# -----------------------------------------------------------
+# 모델 체크포인트 로드 유틸
+# -----------------------------------------------------------
+def load_checkpoint(model, ckpt_path, device="cuda"):
+    """학습된 모델 파라미터(.ckpt) 파일을 로드합니다."""
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"[load_checkpoint] checkpoint not found: {ckpt_path}")
+
+    checkpoint = torch.load(ckpt_path, map_location=device)
+
+    # 일반적인 PyTorch state_dict 구조
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["state_dict"], strict=False)
+    elif isinstance(checkpoint, dict):
+        model.load_state_dict(checkpoint, strict=False)
+    else:
+        raise ValueError(f"[load_checkpoint] Unexpected checkpoint format: {type(checkpoint)}")
+
+    print(f"[INFO] Loaded checkpoint from {ckpt_path}")
+    return model

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ACT training script (for offline UR10e dataset)
+ACT training & evaluation script (for UR10e dataset)
 """
 
 import os
@@ -19,16 +19,15 @@ from utils import load_data, compute_dict_mean, set_seed, detach_dict
 from policy import ACTPolicy, CNNMLPPolicy
 
 
+# -------------------------------------------------------------------------
+# MAIN
+# -------------------------------------------------------------------------
 def main(args):
-    # ------------------------------------------------------------
-    # 0. 기기 설정
-    # ------------------------------------------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] using device = {device}")
 
-    # ------------------------------------------------------------
-    # 1. CLI 파라미터
-    # ------------------------------------------------------------
+    # CLI args
+    is_eval = args["eval"]
     task_name = args["task_name"]
     ckpt_dir = args["ckpt_dir"]
     policy_class = args["policy_class"]
@@ -39,11 +38,10 @@ def main(args):
     dataset_dir_override = args.get("dataset_dir", None)
 
     # ------------------------------------------------------------
-    # 2. Task 설정
+    # Task setup
     # ------------------------------------------------------------
-    if not task_name in TASK_CONFIGS:
+    if task_name not in TASK_CONFIGS:
         raise KeyError(f"[ERROR] task_name '{task_name}' not found in TASK_CONFIGS.")
-
     task_config = TASK_CONFIGS[task_name]
     dataset_dir = dataset_dir_override or task_config["dataset_dir"]
     num_episodes = task_config["num_episodes"]
@@ -56,7 +54,7 @@ def main(args):
     print(f"[INFO] camera_names   = {camera_names}")
 
     # ------------------------------------------------------------
-    # 3. 정책 설정
+    # Policy config
     # ------------------------------------------------------------
     state_dim = 6  # UR10e: 6 DOF
     lr_backbone = 1e-5
@@ -99,13 +97,32 @@ def main(args):
         "seed": seed,
         "temporal_agg": args["temporal_agg"],
         "camera_names": camera_names,
-        "real_robot": False,
         "device": device,
     }
 
-    # ------------------------------------------------------------
-    # 4. 데이터 로드
-    # ------------------------------------------------------------
+    # ============================================================
+    # [EVAL MODE]
+    # ============================================================
+    if is_eval:
+        ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
+        stats_path = os.path.join(ckpt_dir, "dataset_stats.pkl")
+
+        print(f"[INFO] Loading checkpoint from {ckpt_path}")
+        policy = make_policy(policy_class, policy_config).to(device)
+        policy.load_state_dict(torch.load(ckpt_path, map_location=device))
+        policy.eval()
+
+        with open(stats_path, "rb") as f:
+            stats = pickle.load(f)
+        print(f"[INFO] Loaded dataset stats from {stats_path}")
+
+        print("\n✅ Model ready for inference!")
+        print("You can now import this policy inside Isaac Sim or custom_real_env for ACT control.\n")
+        return
+
+    # ============================================================
+    # [TRAIN MODE]
+    # ============================================================
     train_dataloader, val_dataloader, stats, _ = load_data(
         dataset_dir, num_episodes, camera_names, batch_size, batch_size
     )
@@ -114,9 +131,6 @@ def main(args):
         pickle.dump(stats, f)
     print(f"[INFO] saved dataset stats -> {ckpt_dir}/dataset_stats.pkl")
 
-    # ------------------------------------------------------------
-    # 5. 학습
-    # ------------------------------------------------------------
     best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
     best_epoch, min_val_loss, best_state_dict = best_ckpt_info
     ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
@@ -125,7 +139,7 @@ def main(args):
 
 
 # -------------------------------------------------------------------------
-# 헬퍼 함수들
+# HELPER FUNCTIONS
 # -------------------------------------------------------------------------
 def make_policy(policy_class, policy_config):
     return ACTPolicy(policy_config) if policy_class == "ACT" else CNNMLPPolicy(policy_config)
@@ -219,19 +233,20 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
 
 
 # -------------------------------------------------------------------------
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt_dir", type=str, required=True)
-    parser.add_argument("--policy_class", type=str, required=True)
-    parser.add_argument("--task_name", type=str, required=True)
-    parser.add_argument("--batch_size", type=int, required=True)
-    parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--num_epochs", type=int, required=True)
-    parser.add_argument("--lr", type=float, required=True)
-    parser.add_argument("--dataset_dir", type=str, required=False)
-    parser.add_argument("--kl_weight", type=int, required=False)
-    parser.add_argument("--chunk_size", type=int, required=False)
-    parser.add_argument("--hidden_dim", type=int, required=False)
-    parser.add_argument("--dim_feedforward", type=int, required=False)
-    parser.add_argument("--temporal_agg", action="store_true")
+    parser.add_argument('--eval', action='store_true', help='run inference instead of training')
+    parser.add_argument('--ckpt_dir', type=str, required=True)
+    parser.add_argument('--policy_class', type=str, required=True)
+    parser.add_argument('--task_name', type=str, required=True)
+    parser.add_argument('--batch_size', type=int, required=True)
+    parser.add_argument('--seed', type=int, required=True)
+    parser.add_argument('--num_epochs', type=int, required=True)
+    parser.add_argument('--lr', type=float, required=True)
+    parser.add_argument('--kl_weight', type=int)
+    parser.add_argument('--chunk_size', type=int)
+    parser.add_argument('--hidden_dim', type=int)
+    parser.add_argument('--dim_feedforward', type=int)
+    parser.add_argument('--temporal_agg', action='store_true')
+
     main(vars(parser.parse_args()))
