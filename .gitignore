@@ -1,5 +1,12 @@
+# 로그 / 결과 / 데이터 / 모델 제외
 logs/
 outputs/
 datasets/
 checkpoints/
-.*/
+
+# 숨김 파일 중 .git 은 유지
+.*
+!.gitignore
+!.gitattributes
+!.gitmodules
+
