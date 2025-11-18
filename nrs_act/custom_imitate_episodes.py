@@ -10,6 +10,7 @@ import pickle
 import argparse
 from copy import deepcopy
 from datetime import datetime
+from typing import Optional  # <-- Python 3.8 호환 위해 추가
 
 import numpy as np
 import torch
@@ -24,7 +25,7 @@ from policy import ACTPolicy, CNNMLPPolicy
 # -------------------------------------------------------------------------
 # 유틸: 루트 디렉터리 아래에서 MMDD_HHMM 형식의 가장 최신 폴더 찾기
 # -------------------------------------------------------------------------
-def find_latest_timestamped_subdir(root_dir: str) -> str | None:
+def find_latest_timestamped_subdir(root_dir: str) -> Optional[str]:
     """
     ckpt_root_dir 아래에서 이름이 '%m%d_%H%M' 형식인 폴더들 중 가장 최신을 반환.
     예) 1116_1203, 1114_1643 등
@@ -38,7 +39,6 @@ def find_latest_timestamped_subdir(root_dir: str) -> str | None:
         if not os.path.isdir(sub):
             continue
         try:
-            # 형식 맞는지만 확인 (값은 안 씀)
             datetime.strptime(name, "%m%d_%H%M")
             candidates.append((name, sub))
         except ValueError:
@@ -47,7 +47,6 @@ def find_latest_timestamped_subdir(root_dir: str) -> str | None:
     if not candidates:
         return None
 
-    # 폴더명 기준 역순 정렬 → 가장 최근 것 선택
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
 
@@ -90,7 +89,6 @@ def train_bc(train_dataloader, val_dataloader, config):
     min_val_loss   = np.inf
     best_ckpt_info = None
 
-    # ------------ 디버그: 모델 구조/파라미터 수 출력 ------------
     n_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print(f"[DEBUG] Policy class = {policy_class}, trainable params = {n_params/1e6:.2f}M")
 
@@ -105,14 +103,11 @@ def train_bc(train_dataloader, val_dataloader, config):
             validation_history.append(epoch_summary)
             epoch_val_loss = epoch_summary["loss"]
 
-            # 디버그: 첫 에폭에서 loss 구성 요소 한 번 찍기
             if epoch == 0:
                 print("[DEBUG] Val dict example:", {k: float(v) for k, v in epoch_summary.items()})
 
             if epoch_val_loss < min_val_loss:
                 min_val_loss = epoch_val_loss
-
-                # ✅ ACT일 때는 DETRVAE(backbone+transformer) state_dict만 따로 저장
                 if policy_class == "ACT":
                     best_state = deepcopy(policy.model.state_dict())
                 else:
@@ -133,18 +128,15 @@ def train_bc(train_dataloader, val_dataloader, config):
             optimizer.zero_grad()
             train_history.append(detach_dict(forward_dict))
 
-            # 디버그: 첫 에폭 앞쪽 배치 몇 개 loss 출력
             if epoch == 0 and batch_idx < 3:
                 print(f"[DEBUG] Epoch 0, batch {batch_idx}, train loss = {float(loss):.5f}")
 
-        # ---------------- Epoch summary ----------------
         num_batches = batch_idx + 1
         start = num_batches * epoch
         end   = num_batches * (epoch + 1)
         epoch_summary = compute_dict_mean(train_history[start:end])
         print(f"Train loss: {epoch_summary['loss']:.5f}")
 
-        # 100 에폭마다 중간 체크포인트 저장
         if epoch % 100 == 0:
             ckpt_path = os.path.join(ckpt_dir, f"policy_epoch_{epoch}_seed_{seed}.ckpt")
             if policy_class == "ACT":
@@ -182,10 +174,9 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] using device = {device}")
 
-    # CLI args
     is_eval       = args["eval"]
     task_name     = args["task_name"]
-    ckpt_root_dir = args["ckpt_dir"]   # 사용자가 넘기는 것은 "루트" 디렉터리
+    ckpt_root_dir = args["ckpt_dir"]
     policy_class  = args["policy_class"]
     num_epochs    = args["num_epochs"]
     batch_size    = args["batch_size"]
@@ -193,9 +184,6 @@ def main(args):
     lr            = args["lr"]
     dataset_dir_override = args.get("dataset_dir", None)
 
-    # ------------------------------------------------------------
-    # Task setup
-    # ------------------------------------------------------------
     if task_name not in TASK_CONFIGS:
         raise KeyError(f"[ERROR] task_name '{task_name}' not found in TASK_CONFIGS.")
     task_config  = TASK_CONFIGS[task_name]
@@ -209,10 +197,7 @@ def main(args):
     print(f"[INFO] num_episodes   = {num_episodes}")
     print(f"[INFO] camera_names   = {camera_names}")
 
-    # ------------------------------------------------------------
-    # Policy config
-    # ------------------------------------------------------------
-    state_dim    = 6  # UR10e: 6 DOF
+    state_dim    = 6
     lr_backbone  = 1e-5
     backbone     = "resnet18"
 
@@ -241,10 +226,9 @@ def main(args):
     else:
         raise NotImplementedError
 
-    # ---------------- 공통 config ----------------
     config = {
         "num_epochs": num_epochs,
-        "ckpt_dir": None,            # 아래에서 채움
+        "ckpt_dir": None,
         "episode_len": episode_len,
         "state_dim": state_dim,
         "lr": lr,
@@ -258,15 +242,13 @@ def main(args):
     }
 
     # ============================================================
-    # [EVAL MODE]  → 가장 최신 시간 폴더 자동 선택
+    # [EVAL MODE]
     # ============================================================
     if is_eval:
-        # 1) 먼저 root_dir 바로 아래에 policy_best.ckpt 가 있으면 그걸 사용
         ckpt_dir = ckpt_root_dir
         best_ckpt = os.path.join(ckpt_dir, "policy_best.ckpt")
 
         if not os.path.exists(best_ckpt):
-            # 2) 없으면, MMDD_HHMM 형식 하위 폴더 중 가장 최신 선택
             latest_sub = find_latest_timestamped_subdir(ckpt_root_dir)
             if latest_sub is None:
                 raise FileNotFoundError(
@@ -290,7 +272,6 @@ def main(args):
 
         ckpt = torch.load(best_ckpt, map_location=device)
         if policy_class == "ACT":
-            # 학습에서 DETRVAE state_dict만 저장했으므로, model에만 로드
             state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
             policy.model.load_state_dict(state_dict, strict=False)
         else:
@@ -307,9 +288,8 @@ def main(args):
         return
 
     # ============================================================
-    # [TRAIN MODE]  → 실행 시간 기반으로 하위 폴더 생성 후 그 안에 저장
+    # [TRAIN MODE]
     # ============================================================
-    # 예: /home/.../checkpoints/ur10e_swing/1116_1203/
     timestamp = datetime.now().strftime("%m%d_%H%M")
     ckpt_dir = os.path.join(ckpt_root_dir, timestamp)
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -317,17 +297,14 @@ def main(args):
 
     config["ckpt_dir"] = ckpt_dir
 
-    # 데이터 로드
     train_dataloader, val_dataloader, stats, _ = load_data(
         dataset_dir, num_episodes, camera_names, batch_size, batch_size
     )
 
-    # dataset 통계 저장
     with open(os.path.join(ckpt_dir, "dataset_stats.pkl"), "wb") as f:
         pickle.dump(stats, f)
     print(f"[INFO] saved dataset stats -> {ckpt_dir}/dataset_stats.pkl")
 
-    # 학습
     best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
     best_epoch, min_val_loss, best_state_dict = best_ckpt_info
 
