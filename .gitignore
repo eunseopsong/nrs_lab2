@@ -16,4 +16,5 @@ logs/
 outputs/
 datasets/
 .*/
+analysis_logs/
 >>>>>>> origin/main
