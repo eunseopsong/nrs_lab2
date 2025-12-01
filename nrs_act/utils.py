@@ -27,16 +27,16 @@ def _list_episode_ids(dataset_dir: str):
 class EpisodicDataset(torch.utils.data.Dataset):
     def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats):
         super().__init__()
-        self.episode_ids = list(episode_ids)
-        self.dataset_dir = dataset_dir
+        self.episode_ids  = list(episode_ids)
+        self.dataset_dir  = dataset_dir
         self.camera_names = camera_names
-        self.norm_stats = norm_stats
-        self.is_sim = False  # 기본값
+        self.norm_stats   = norm_stats
+        self.is_sim       = False  # 기본값
 
         # 에피소드가 하나도 없으면 여기서 끝
         if len(self.episode_ids) > 0:
             # 맨 처음 에피소드 한 번만 열어서 is_sim 값 알아낸다
-            _id0 = self.episode_ids[0]
+            _id0  = self.episode_ids[0]
             path0 = os.path.join(self.dataset_dir, f"episode_{_id0}.hdf5")
             with h5py.File(path0, "r") as root:
                 self.is_sim = bool(root.attrs.get("sim", False))
@@ -45,111 +45,163 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return len(self.episode_ids)
 
     def __getitem__(self, index):
-        sample_full_episode = False  # 그냥 원본 유지
+        # 원래 코드 구조 유지: 한 시점의 observation + 그 이후 전체 action 시퀀스
+        sample_full_episode = False
 
-        episode_id = self.episode_ids[index]
+        episode_id   = self.episode_ids[index]
         dataset_path = os.path.join(self.dataset_dir, f"episode_{episode_id}.hdf5")
+
         with h5py.File(dataset_path, "r") as root:
             is_sim = bool(root.attrs.get("sim", False))
 
-            original_action_shape = root["/action"].shape  # (T, 6) or (T, 12)
+            # -------------------------
+            # 1) action(joints) shape
+            # -------------------------
+            if "/action/joints" in root:
+                action_joints_ds = root["/action/joints"]   # (T, 6)
+            else:
+                # 혹시 구버전(/action)만 있는 경우 대비
+                action_joints_ds = root["/action"]
+
+            original_action_shape = action_joints_ds.shape   # (T, 6)
             episode_len = original_action_shape[0]
 
-            # 1) 시작 시점 뽑기
+            # -------------------------
+            # 2) 시작 시점 선택
+            # -------------------------
             if sample_full_episode:
                 start_ts = 0
             else:
                 # 0 ~ T-1 중 하나
                 start_ts = np.random.randint(0, episode_len)
 
-            # 2) 관측 한 프레임만
-            qpos = root["/observations/qpos"][start_ts]
-            qvel = root["/observations/qvel"][start_ts]  # 지금은 안 쓰지만 남겨둠
+            # -------------------------
+            # 3) 관측 한 프레임 (qpos + 이미지)
+            # -------------------------
+            qpos = root["/observations/qpos"][start_ts]  # (6,)
+            qvel = root["/observations/qvel"][start_ts]  # 지금은 사용 안 함
 
             image_dict = {}
             for cam_name in self.camera_names:
                 # 예: /observations/images/cam_front
                 image_dict[cam_name] = root[f"/observations/images/{cam_name}"][start_ts]
 
-            # 3) 액션은 start_ts 이후 전부
+            # -------------------------
+            # 4) action 시퀀스 (joints만 사용)
+            #    - sim이면 start_ts 이후
+            #    - real이면 기존 코드대로 (start_ts - 1)부터
+            # -------------------------
             if is_sim:
-                action = root["/action"][start_ts:]
+                action = action_joints_ds[start_ts:]            # (T - start_ts, 6)
                 action_len = episode_len - start_ts
             else:
-                # 원래 코드가 이렇게 되어 있어서 유지
-                action = root["/action"][max(0, start_ts - 1) :]
-                action_len = episode_len - max(0, start_ts - 1)
+                start_for_action = max(0, start_ts - 1)
+                action = action_joints_ds[start_for_action:]    # (T - start_for_action, 6)
+                action_len = episode_len - start_for_action
 
         # dataset 멤버에도 저장 (load_data에서 쓰려고)
         self.is_sim = is_sim
 
-        # 4) 패딩해서 길이 맞추기
+        # -------------------------
+        # 5) 패딩해서 길이 맞추기
+        # -------------------------
         padded_action = np.zeros(original_action_shape, dtype=np.float32)
         padded_action[:action_len] = action
 
         is_pad = np.zeros(episode_len, dtype=np.float32)
         is_pad[action_len:] = 1.0
 
-        # 5) 여러 카메라 쌓기 -> (K, H, W, C)
+        # -------------------------
+        # 6) 여러 카메라 한 텐서로 쌓기 -> (K, H, W, C)
+        # -------------------------
         all_cam_images = [image_dict[cam_name] for cam_name in self.camera_names]
-        all_cam_images = np.stack(all_cam_images, axis=0)
+        all_cam_images = np.stack(all_cam_images, axis=0)   # (K, H, W, C)
 
-        # 6) torch tensor로 변환
-        image_data = torch.from_numpy(all_cam_images)            # (K, H, W, C)
-        qpos_data = torch.from_numpy(qpos).float()               # (D,)
-        action_data = torch.from_numpy(padded_action).float()    # (T, D)
-        is_pad = torch.from_numpy(is_pad).bool()                 # (T,)
+        # -------------------------
+        # 7) torch tensor로 변환
+        # -------------------------
+        image_data  = torch.from_numpy(all_cam_images)         # (K, H, W, C)
+        qpos_data   = torch.from_numpy(qpos).float()           # (6,)
+        action_data = torch.from_numpy(padded_action).float()  # (T, 6)
+        is_pad      = torch.from_numpy(is_pad).bool()          # (T,)
 
         # 채널 순서 바꾸기: (K, H, W, C) -> (K, C, H, W)
         image_data = torch.einsum("k h w c -> k c h w", image_data)
-        # 정규화
-        image_data = image_data / 255.0
+        image_data = image_data / 255.0   # [0,1] 정규화
 
-        # ---- 여기서부터 normalization ----
+        # -------------------------
+        # 8) normalization
+        # -------------------------
         action_mean = torch.tensor(self.norm_stats["action_mean"]).float()
-        action_std = torch.tensor(self.norm_stats["action_std"]).float()
-        qpos_mean = torch.tensor(self.norm_stats["qpos_mean"]).float()
-        qpos_std = torch.tensor(self.norm_stats["qpos_std"]).float()
+        action_std  = torch.tensor(self.norm_stats["action_std"]).float()
+        qpos_mean   = torch.tensor(self.norm_stats["qpos_mean"]).float()
+        qpos_std    = torch.tensor(self.norm_stats["qpos_std"]).float()
 
         action_data = (action_data - action_mean) / action_std
-        qpos_data = (qpos_data - qpos_mean) / qpos_std
+        qpos_data   = (qpos_data - qpos_mean) / qpos_std
 
         return image_data, qpos_data, action_data, is_pad
 
 
 def get_norm_stats(dataset_dir, episode_ids):
-    """실제로 있는 episode들만 모아서 평균/표준편차 계산."""
-    all_qpos_data = []
+    """
+    HDF5 구조:
+      - /observations/qpos      : (T, 6)
+      - /action/joints          : (T, 6)
+      - /action/ft              : (T, 3)   # 통계는 joints만 사용
+    실제로 존재하는 episode들만 모아서 평균/표준편차 계산.
+    """
+    all_qpos_data   = []
     all_action_data = []
 
     for episode_idx in episode_ids:
         dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}.hdf5")
+        if not os.path.exists(dataset_path):
+            print(f"[WARN] get_norm_stats: {dataset_path} not found, skip")
+            continue
+
         with h5py.File(dataset_path, "r") as root:
-            qpos = root["/observations/qpos"][()]   # (T, D)
-            action = root["/action"][()]            # (T, D)
+            # qpos: (T, 6)
+            if "/observations/qpos" in root:
+                qpos = root["/observations/qpos"][()]   # (T, 6)
+            else:
+                qpos = root["observations"]["qpos"][()]
+
+            # action(joints): (T, 6)
+            if "/action/joints" in root:
+                action_joints = root["/action/joints"][()]   # (T, 6)
+            elif "action" in root:
+                action_joints = root["action"][()]
+            else:
+                print(f"[WARN] get_norm_stats: no action(joints) in {dataset_path}, skip")
+                continue
+
         all_qpos_data.append(torch.from_numpy(qpos))
-        all_action_data.append(torch.from_numpy(action))
+        all_action_data.append(torch.from_numpy(action_joints))
+
+    if len(all_qpos_data) == 0:
+        raise RuntimeError(f"[get_norm_stats] No valid episodes found in {dataset_dir}")
 
     # (N, T, D) 로 쌓기
-    all_qpos_data = torch.stack(all_qpos_data)       # (N, T, D)
-    all_action_data = torch.stack(all_action_data)   # (N, T, D)
+    all_qpos_data   = torch.stack(all_qpos_data)       # (N, T, 6)
+    all_action_data = torch.stack(all_action_data)     # (N, T, 6)
 
-    # action
+    # action (joints)
     action_mean = all_action_data.mean(dim=[0, 1], keepdim=True)
-    action_std = all_action_data.std(dim=[0, 1], keepdim=True)
-    action_std = torch.clip(action_std, 1e-2, np.inf)
+    action_std  = all_action_data.std(dim=[0, 1], keepdim=True)
+    action_std  = torch.clip(action_std, 1e-2, np.inf)
 
     # qpos
     qpos_mean = all_qpos_data.mean(dim=[0, 1], keepdim=True)
-    qpos_std = all_qpos_data.std(dim=[0, 1], keepdim=True)
-    qpos_std = torch.clip(qpos_std, 1e-2, np.inf)
+    qpos_std  = all_qpos_data.std(dim=[0, 1], keepdim=True)
+    qpos_std  = torch.clip(qpos_std, 1e-2, np.inf)
 
     stats = {
-        "action_mean": action_mean.numpy().squeeze(),
-        "action_std": action_std.numpy().squeeze(),
-        "qpos_mean": qpos_mean.numpy().squeeze(),
-        "qpos_std": qpos_std.numpy().squeeze(),
-        "example_qpos": qpos,  # 마지막 에피소드 qpos 하나 넣어둠
+        "action_mean": action_mean.numpy().squeeze(),  # (6,)
+        "action_std":  action_std.numpy().squeeze(),   # (6,)
+        "qpos_mean":   qpos_mean.numpy().squeeze(),    # (6,)
+        "qpos_std":    qpos_std.numpy().squeeze(),     # (6,)
+        "example_qpos": all_qpos_data[0].numpy(),      # 첫 에피소드 예시
     }
     return stats
 
@@ -163,19 +215,19 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     print(f"\nData from: {dataset_dir}")
     print(f"Found {len(episode_ids)} episodes: {episode_ids}\n")
 
-    # split
+    # train/val split
     train_ratio = 0.8
     shuffled = np.random.permutation(episode_ids)
     split_idx = int(len(shuffled) * train_ratio)
     train_ids = shuffled[:split_idx]
-    val_ids = shuffled[split_idx:]
+    val_ids   = shuffled[split_idx:]
 
-    # stats는 전체 episode 기준으로
+    # 정규화 통계는 전체 episode 기준
     norm_stats = get_norm_stats(dataset_dir, episode_ids)
 
     # dataset & dataloader
     train_dataset = EpisodicDataset(train_ids, dataset_dir, camera_names, norm_stats)
-    val_dataset = EpisodicDataset(val_ids, dataset_dir, camera_names, norm_stats)
+    val_dataset   = EpisodicDataset(val_ids,   dataset_dir, camera_names, norm_stats)
 
     train_dataloader = DataLoader(
         train_dataset,

@@ -3,6 +3,14 @@
 """
 ACT training & evaluation script (for UR10e dataset)
 - UR10e + 2-camera ACT 세팅
+- HDF5 구조 (episode_x.hdf5):
+    /observations/qpos              : (T, 6)
+    /observations/qvel              : (T, 6)
+    /observations/images/cam_front  : (T, H, W, 3)
+    /observations/images/cam_head   : (T, H, W, 3)
+    /observations/is_pad            : (T,)
+    /action                         : (T, 9)  # [joints(6) | ft(3)]
+    /meta/*
 """
 
 import os
@@ -10,7 +18,7 @@ import pickle
 import argparse
 from copy import deepcopy
 from datetime import datetime
-from typing import Optional  # <-- Python 3.8 호환 위해 추가
+from typing import Optional  # Python 3.8 호환
 
 import numpy as np
 import torch
@@ -63,6 +71,13 @@ def make_optimizer(policy_class, policy):
 
 
 def forward_pass(data, policy, device):
+    """
+    data: (image_data, qpos_data, action_data, is_pad)
+      - image_data: dict of camera_name -> (B, T, C, H, W)
+      - qpos_data : (B, T, 6)
+      - action_data: (B, T, D_action)  # 여기서 D_action=9 (6 joints + 3 ft)
+      - is_pad    : (B, T)
+    """
     image_data, qpos_data, action_data, is_pad = data
     image_data, qpos_data, action_data, is_pad = (
         image_data.to(device),
@@ -187,9 +202,17 @@ def main(args):
     if task_name not in TASK_CONFIGS:
         raise KeyError(f"[ERROR] task_name '{task_name}' not found in TASK_CONFIGS.")
     task_config  = TASK_CONFIGS[task_name]
+
+    # ---------------- Dataset directory ----------------
     dataset_dir  = dataset_dir_override or task_config["dataset_dir"]
-    # ✅ episodes → episodes_ft 로 변경
-    dataset_dir  = dataset_dir.replace("episodes", "episodes_ft")
+
+    # episodes / episodes_ft 정리:
+    # - TASK_CONFIGS 안이 "episodes" 옛 경로일 수도 있고
+    # - 이미 "episodes_ft" 로 되어 있을 수도 있음
+    base_name = os.path.basename(dataset_dir)
+    if "episodes_ft" not in base_name:
+        dataset_dir = dataset_dir.replace("episodes", "episodes_ft")
+
     num_episodes = task_config["num_episodes"]
     episode_len  = task_config.get("episode_len", 100)
     camera_names = task_config["camera_names"]
@@ -199,6 +222,7 @@ def main(args):
     print(f"[INFO] num_episodes   = {num_episodes}")
     print(f"[INFO] camera_names   = {camera_names}")
 
+    # qpos 차원
     state_dim    = 6
     lr_backbone  = 1e-5
     backbone     = "resnet18"
