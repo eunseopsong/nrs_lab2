@@ -4,7 +4,7 @@ import os
 import argparse
 import h5py
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional
 from datetime import datetime
 from pathlib import Path
 
@@ -21,7 +21,6 @@ def find_latest_folder(root_dir: str) -> Optional[str]:
     candidates = []
     for child in p.iterdir():
         if child.is_dir():
-            # 폴더 이름이 4자리_4자리 형태인지 확인
             name = child.name
             try:
                 datetime.strptime(name, "%m%d_%H%M")
@@ -32,7 +31,6 @@ def find_latest_folder(root_dir: str) -> Optional[str]:
     if not candidates:
         return None
 
-    # 이름 기준으로 정렬하면 시간 순서가 됨
     candidates.sort(key=lambda x: x.name, reverse=True)
     return str(candidates[0])
 
@@ -54,10 +52,24 @@ def write_episode_hdf5(out_path: str,
                        qpos: np.ndarray,
                        cam_front: np.ndarray,
                        cam_head: np.ndarray,
-                       action: np.ndarray,
+                       action_joints: np.ndarray,
+                       action_ft: np.ndarray,
                        orig_len: int,
                        T_pad: int,
                        truncated: bool):
+    """
+    하나의 demo를 ACT-style episode_x.hdf5로 저장.
+
+    - /observations/qpos          : (T_pad, 6)   <- obs_joints
+    - /observations/qvel          : (T_pad, 6)   <- zeros
+    - /observations/images/cam_*  : (T_pad, H, W, 3)
+    - /observations/is_pad        : (T_pad, )
+
+    - /action/joints              : (T_pad, 6)   <- action_joints
+    - /action/ft                  : (T_pad, 3)   <- action_ft
+
+    ※ ft 는 observation 에 넣지 않음
+    """
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     # padding mask
@@ -75,6 +87,7 @@ def write_episode_hdf5(out_path: str,
         qvel = np.zeros_like(qpos, dtype=np.float64)
         h.create_dataset("/observations/qvel", data=qvel, dtype="float64")
 
+        # 이미지
         h.create_dataset("/observations/images/cam_front",
                          data=cam_front,
                          dtype="uint8",
@@ -85,17 +98,20 @@ def write_episode_hdf5(out_path: str,
                          dtype="uint8",
                          chunks=True,
                          compression="lzf")
+
         h.create_dataset("/observations/is_pad", data=is_pad, dtype="bool")
 
-        # action
-        h.create_dataset("/action", data=action, dtype="float64")
+        # action: joints / ft 를 분리해서 저장
+        act_grp = h.create_group("/action")
+        act_grp.create_dataset("joints", data=action_joints.astype(np.float64), dtype="float64")
+        act_grp.create_dataset("ft",     data=action_ft.astype(np.float64),     dtype="float64")
 
         # meta
         meta = h.create_group("/meta")
-        meta.create_dataset("orig_len", data=np.array(orig_len, dtype=np.int64))
-        meta.create_dataset("T_pad", data=np.array(T_pad, dtype=np.int64))
+        meta.create_dataset("orig_len",      data=np.array(orig_len, dtype=np.int64))
+        meta.create_dataset("T_pad",         data=np.array(T_pad, dtype=np.int64))
         meta.create_dataset("pad_starts_at", data=np.array(pad_starts_at, dtype=np.int64))
-        meta.create_dataset("truncated", data=np.array(truncated, dtype=np.bool_))
+        meta.create_dataset("truncated",     data=np.array(truncated, dtype=np.bool_))
 
     return out_path
 
@@ -105,6 +121,13 @@ def convert_streaming(input_path: str,
                       truncate: bool = False):
     """
     메모리에 전부 올리지 않고 /data/demo_k 를 하나씩 읽어서 바로 episode로 저장.
+    ur10e_act_data_gen.cpp 가 만든 새 HDF5 구조를 그대로 사용:
+
+      - obs_joints      : (T, 6)
+      - action_joints   : (T, 6)
+      - action_ft       : (T, 3)
+      - obs_image_front : (T, H, W, 3)
+      - obs_image_top   : (T, H, W, 3)
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -124,16 +147,15 @@ def convert_streaming(input_path: str,
         if len(demo_keys) == 0:
             raise ValueError("No demos found in input.")
 
-        # 먼저 모든 demo 길이를 한 번 훑어서 max 길이 구함 (메모리 거의 안 듦)
+        # 먼저 모든 demo 길이를 한 번 훑어서 max 길이 구함 (obs_joints 기준)
         lengths = []
         for demo_key in demo_keys:
             grp = data_grp[demo_key]
-            # 우리가 기록한 이름: joints, image_front, image_top
-            if "joints" not in grp:
-                print(f"[WARN] {demo_key} has no 'joints', skip")
+            if "obs_joints" not in grp:
+                print(f"[WARN] {demo_key} has no 'obs_joints', skip")
                 lengths.append(0)
                 continue
-            T = grp["joints"].shape[0]
+            T = grp["obs_joints"].shape[0]
             lengths.append(T)
 
         T_max = max(lengths)
@@ -150,30 +172,60 @@ def convert_streaming(input_path: str,
         for idx, demo_key in enumerate(demo_keys):
             grp = data_grp[demo_key]
 
-            if "joints" not in grp:
-                print(f"[SKIP] {demo_key}: no joints")
+            # 필수 키 체크
+            required_keys = [
+                "obs_joints",
+                "action_joints",
+                "action_ft",
+                "obs_image_front",
+                "obs_image_top",
+            ]
+            missing = [k for k in required_keys if k not in grp]
+            if missing:
+                print(f"[SKIP] {demo_key}: missing {missing}")
                 continue
 
-            joints = grp["joints"][()]  # (T, 6)
-            # 카메라 이름: image_front / image_top 으로 저장했으니 여기서 매칭
-            if "image_front" not in grp or "image_top" not in grp:
-                print(f"[WARN] {demo_key}: missing image_front or image_top, skip")
+            obs_joints    = grp["obs_joints"][()]       # (T, 6)
+            action_joints = grp["action_joints"][()]    # (T, 6)
+            action_ft     = grp["action_ft"][()]        # (T, 3)
+            img_front     = grp["obs_image_front"][()]  # (T, H, W, 3)
+            img_top       = grp["obs_image_top"][()]    # (T, H, W, 3)
+
+            # 길이 불일치 방어: 최소 길이에 맞춰 자르기
+            T_list = [
+                obs_joints.shape[0],
+                action_joints.shape[0],
+                action_ft.shape[0],
+                img_front.shape[0],
+                img_top.shape[0],
+            ]
+            T_min = min(T_list)
+            if T_min < 1:
+                print(f"[SKIP] {demo_key}: too short (T_min={T_min})")
                 continue
 
-            img_front = grp["image_front"][()]  # (T, H, W, 3)
-            img_top   = grp["image_top"][()]
+            if obs_joints.shape[0] != T_min:
+                obs_joints = obs_joints[:T_min]
+            if action_joints.shape[0] != T_min:
+                action_joints = action_joints[:T_min]
+            if action_ft.shape[0] != T_min:
+                action_ft = action_ft[:T_min]
+            if img_front.shape[0] != T_min:
+                img_front = img_front[:T_min]
+            if img_top.shape[0] != T_min:
+                img_top = img_top[:T_min]
 
-            # observations/qpos = joints
-            qpos = joints.astype(np.float64)
-            # action = qpos 그대로
-            action = qpos.copy()
+            # observations/qpos = obs_joints
+            qpos = obs_joints.astype(np.float64)
 
             orig_T = qpos.shape[0]
 
-            qpos_p      = pad_repeat_last(qpos,      T_pad)
-            img_front_p = pad_repeat_last(img_front, T_pad)
-            img_top_p   = pad_repeat_last(img_top,   T_pad)
-            action_p    = pad_repeat_last(action,    T_pad)
+            # pad
+            qpos_p          = pad_repeat_last(qpos,          T_pad)
+            img_front_p     = pad_repeat_last(img_front,     T_pad)
+            img_top_p       = pad_repeat_last(img_top,       T_pad)
+            action_joints_p = pad_repeat_last(action_joints, T_pad)
+            action_ft_p     = pad_repeat_last(action_ft,     T_pad)
 
             ep_name = f"episode_{idx}.hdf5"
             out_path = os.path.join(output_dir, ep_name)
@@ -183,7 +235,8 @@ def convert_streaming(input_path: str,
                                qpos_p,
                                img_front_p,
                                img_top_p,
-                               action_p,
+                               action_joints_p,
+                               action_ft_p,
                                orig_len=orig_T,
                                T_pad=T_pad,
                                truncated=truncated_flag)
@@ -204,7 +257,7 @@ def convert_streaming(input_path: str,
     with open(os.path.join(output_dir, "manifest.json"), "w") as fp:
         json.dump(manifest, fp, indent=2)
 
-    print("[DONE] conversion complete. T_pad =", T_pad)
+    print("[DONE] conversion complete. T_pad =", manifest["T_pad"])
 
 def main():
     parser = argparse.ArgumentParser()
@@ -224,10 +277,17 @@ def main():
         if latest_dir is None:
             raise FileNotFoundError(f"No dated folder found under {args.root}")
         input_path = os.path.join(latest_dir, "act_data.hdf5")
-        output_dir = os.path.join(latest_dir, "episodes") if args.output is None else args.output
+        # 기본 출력 폴더를 episodes_ft 로 설정
+        default_subdir = "episodes_ft"
+        output_dir = args.output if args.output is not None else os.path.join(latest_dir, default_subdir)
     else:
         input_path = args.input
-        output_dir = args.output if args.output is not None else os.path.join(os.path.dirname(input_path), "episodes")
+        if args.output is not None:
+            output_dir = args.output
+        else:
+            # input hdf5와 같은 상위 폴더 아래에 episodes_ft 생성
+            base_dir = os.path.dirname(input_path)
+            output_dir = os.path.join(base_dir, "episodes_ft")
 
     print(f"[INFO] input  = {input_path}")
     print(f"[INFO] output = {output_dir}")

@@ -188,6 +188,8 @@ def main(args):
         raise KeyError(f"[ERROR] task_name '{task_name}' not found in TASK_CONFIGS.")
     task_config  = TASK_CONFIGS[task_name]
     dataset_dir  = dataset_dir_override or task_config["dataset_dir"]
+    # ✅ episodes → episodes_ft 로 변경
+    dataset_dir  = dataset_dir.replace("episodes", "episodes_ft")
     num_episodes = task_config["num_episodes"]
     episode_len  = task_config.get("episode_len", 100)
     camera_names = task_config["camera_names"]
