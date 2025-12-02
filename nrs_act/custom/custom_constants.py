@@ -50,7 +50,7 @@ TASK_CONFIGS = {
         "obs_horizon": 1,
         "action_horizon": 8,
         "pred_horizon": 8,
-        "episode_len": 600,  # 한 에피소드 프레임 수 (기본 100~200 사이 추천)
+        "episode_len": 420,  # 한 에피소드 프레임 수 (기본 100~200 사이 추천)
     }
 }
 

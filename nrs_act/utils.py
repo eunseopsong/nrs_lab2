@@ -25,6 +25,21 @@ def _list_episode_ids(dataset_dir: str):
 
 
 class EpisodicDataset(torch.utils.data.Dataset):
+    """
+    HDF5 구조 가정:
+
+      - /observations/qpos              : (T, 6)
+      - /observations/qvel              : (T, 6)   # 지금은 안 쓰지만 그대로 둠
+      - /observations/images/cam_front  : (T, H, W, 3)
+      - /observations/images/cam_head   : (T, H, W, 3)
+      - /action/joints                  : (T, 6)
+      - /action/ft                      : (T, 3)   # 없으면 0으로 채움
+        * 혹은 /action                  : (T, 6) 또는 (T, 9) 구버전 호환용
+
+    이 Dataset 은 한 시점의 (이미지 + qpos)를 observation 으로 꺼내고,
+    그 시점 이후의 action 시퀀스(길이 T, dim=9)를 패딩해서 반환한다.
+    """
+
     def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats):
         super().__init__()
         self.episode_ids  = list(episode_ids)
@@ -55,15 +70,43 @@ class EpisodicDataset(torch.utils.data.Dataset):
             is_sim = bool(root.attrs.get("sim", False))
 
             # -------------------------
-            # 1) action(joints) shape
+            # 1) action(joints + ft) 읽기
+            #    joints: (T, 6), ft: (T, 3) → concat → (T, 9)
+            #    * /action/joints + /action/ft 조합이 우선
+            #    * 그 다음 /action (T,9) 또는 (T,6) fallback
             # -------------------------
             if "/action/joints" in root:
-                action_joints_ds = root["/action/joints"]   # (T, 6)
-            else:
-                # 혹시 구버전(/action)만 있는 경우 대비
-                action_joints_ds = root["/action"]
+                joints_ds = root["/action/joints"]              # (T, 6)
+                T = joints_ds.shape[0]
 
-            original_action_shape = action_joints_ds.shape   # (T, 6)
+                if "/action/ft" in root:
+                    ft_ds = root["/action/ft"]                  # (T, 3)
+                    assert ft_ds.shape[0] == T, \
+                        f"ft length mismatch: joints {T}, ft {ft_ds.shape[0]}"
+                    ft = ft_ds[()]                              # (T, 3)
+                else:
+                    ft = np.zeros((T, 3), dtype=np.float32)     # ft 없으면 0
+                joints = joints_ds[()]                          # (T, 6)
+                action_full = np.concatenate([joints, ft], axis=-1)  # (T, 9)
+
+            elif "action" in root:
+                action_raw = root["action"][()]                 # (T, D)
+                T, D = action_raw.shape
+                if D == 9:
+                    # 이미 joints+ft 로 합쳐진 형태
+                    action_full = action_raw
+                elif D == 6:
+                    # joints만 있는 경우 → ft=0 으로 채워서 (T,9) 맞춤
+                    ft = np.zeros((T, 3), dtype=np.float32)
+                    action_full = np.concatenate([action_raw, ft], axis=-1)
+                else:
+                    raise ValueError(
+                        f"[EpisodicDataset] Unsupported action dim {D} in {dataset_path}"
+                    )
+            else:
+                raise KeyError(f"[EpisodicDataset] No action dataset in {dataset_path}")
+
+            original_action_shape = action_full.shape          # (T, 9)
             episode_len = original_action_shape[0]
 
             # -------------------------
@@ -87,16 +130,16 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 image_dict[cam_name] = root[f"/observations/images/{cam_name}"][start_ts]
 
             # -------------------------
-            # 4) action 시퀀스 (joints만 사용)
+            # 4) action 시퀀스 (joints+ft, dim=9)
             #    - sim이면 start_ts 이후
             #    - real이면 기존 코드대로 (start_ts - 1)부터
             # -------------------------
             if is_sim:
-                action = action_joints_ds[start_ts:]            # (T - start_ts, 6)
+                action = action_full[start_ts:]             # (T - start_ts, 9)
                 action_len = episode_len - start_ts
             else:
                 start_for_action = max(0, start_ts - 1)
-                action = action_joints_ds[start_for_action:]    # (T - start_for_action, 6)
+                action = action_full[start_for_action:]     # (T - start_for_action, 9)
                 action_len = episode_len - start_for_action
 
         # dataset 멤버에도 저장 (load_data에서 쓰려고)
@@ -105,7 +148,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # -------------------------
         # 5) 패딩해서 길이 맞추기
         # -------------------------
-        padded_action = np.zeros(original_action_shape, dtype=np.float32)
+        padded_action = np.zeros(original_action_shape, dtype=np.float32)  # (T, 9)
         padded_action[:action_len] = action
 
         is_pad = np.zeros(episode_len, dtype=np.float32)
@@ -122,7 +165,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # -------------------------
         image_data  = torch.from_numpy(all_cam_images)         # (K, H, W, C)
         qpos_data   = torch.from_numpy(qpos).float()           # (6,)
-        action_data = torch.from_numpy(padded_action).float()  # (T, 6)
+        action_data = torch.from_numpy(padded_action).float()  # (T, 9)
         is_pad      = torch.from_numpy(is_pad).bool()          # (T,)
 
         # 채널 순서 바꾸기: (K, H, W, C) -> (K, C, H, W)
@@ -130,15 +173,15 @@ class EpisodicDataset(torch.utils.data.Dataset):
         image_data = image_data / 255.0   # [0,1] 정규화
 
         # -------------------------
-        # 8) normalization
+        # 8) normalization (action: dim=9, qpos: dim=6)
         # -------------------------
-        action_mean = torch.tensor(self.norm_stats["action_mean"]).float()
-        action_std  = torch.tensor(self.norm_stats["action_std"]).float()
-        qpos_mean   = torch.tensor(self.norm_stats["qpos_mean"]).float()
-        qpos_std    = torch.tensor(self.norm_stats["qpos_std"]).float()
+        action_mean = torch.tensor(self.norm_stats["action_mean"]).float()  # (9,)
+        action_std  = torch.tensor(self.norm_stats["action_std"]).float()   # (9,)
+        qpos_mean   = torch.tensor(self.norm_stats["qpos_mean"]).float()    # (6,)
+        qpos_std    = torch.tensor(self.norm_stats["qpos_std"]).float()     # (6,)
 
-        action_data = (action_data - action_mean) / action_std
-        qpos_data   = (qpos_data - qpos_mean) / qpos_std
+        action_data = (action_data - action_mean) / action_std   # (T, 9)
+        qpos_data   = (qpos_data - qpos_mean) / qpos_std         # (6,)
 
         return image_data, qpos_data, action_data, is_pad
 
@@ -148,8 +191,12 @@ def get_norm_stats(dataset_dir, episode_ids):
     HDF5 구조:
       - /observations/qpos      : (T, 6)
       - /action/joints          : (T, 6)
-      - /action/ft              : (T, 3)   # 통계는 joints만 사용
-    실제로 존재하는 episode들만 모아서 평균/표준편차 계산.
+      - /action/ft              : (T, 3)
+        * 또는 /action          : (T, 6) 또는 (T, 9)
+
+    여기서는 "실제 network가 예측해야 하는 action 벡터"와 동일한
+    차원(D=9)에 대해 mean/std 를 계산한다.
+    (joints(6) + ft(3) → dim=9)
     """
     all_qpos_data   = []
     all_action_data = []
@@ -167,38 +214,59 @@ def get_norm_stats(dataset_dir, episode_ids):
             else:
                 qpos = root["observations"]["qpos"][()]
 
-            # action(joints): (T, 6)
+            # --------- action_full (T, 9) 구성 ---------
             if "/action/joints" in root:
-                action_joints = root["/action/joints"][()]   # (T, 6)
+                joints = root["/action/joints"][()]            # (T, 6)
+                T = joints.shape[0]
+                if "/action/ft" in root:
+                    ft = root["/action/ft"][()]                # (T, 3)
+                    assert ft.shape[0] == T, \
+                        f"[get_norm_stats] ft length mismatch in {dataset_path}"
+                else:
+                    ft = np.zeros((T, 3), dtype=np.float32)
+                action_full = np.concatenate([joints, ft], axis=-1)  # (T, 9)
+
             elif "action" in root:
-                action_joints = root["action"][()]
+                action_raw = root["action"][()]                # (T, D)
+                T, D = action_raw.shape
+                if D == 9:
+                    action_full = action_raw
+                elif D == 6:
+                    ft = np.zeros((T, 3), dtype=np.float32)
+                    action_full = np.concatenate([action_raw, ft], axis=-1)
+                else:
+                    print(
+                        f"[WARN] get_norm_stats: Unsupported action dim {D} "
+                        f"in {dataset_path}, skip"
+                    )
+                    continue
             else:
-                print(f"[WARN] get_norm_stats: no action(joints) in {dataset_path}, skip")
+                print(f"[WARN] get_norm_stats: no action in {dataset_path}, skip")
                 continue
 
-        all_qpos_data.append(torch.from_numpy(qpos))
-        all_action_data.append(torch.from_numpy(action_joints))
+        all_qpos_data.append(torch.from_numpy(qpos))          # (T, 6)
+        all_action_data.append(torch.from_numpy(action_full)) # (T, 9)
 
     if len(all_qpos_data) == 0:
         raise RuntimeError(f"[get_norm_stats] No valid episodes found in {dataset_dir}")
 
     # (N, T, D) 로 쌓기
     all_qpos_data   = torch.stack(all_qpos_data)       # (N, T, 6)
-    all_action_data = torch.stack(all_action_data)     # (N, T, 6)
+    all_action_data = torch.stack(all_action_data)     # (N, T, 9)
 
-    # action (joints)
-    action_mean = all_action_data.mean(dim=[0, 1], keepdim=True)
-    action_std  = all_action_data.std(dim=[0, 1], keepdim=True)
+    # action (joints+ft, dim=9)
+    action_mean = all_action_data.mean(dim=[0, 1], keepdim=True)  # (1,1,9)
+    action_std  = all_action_data.std(dim=[0, 1], keepdim=True)   # (1,1,9)
     action_std  = torch.clip(action_std, 1e-2, np.inf)
 
     # qpos
-    qpos_mean = all_qpos_data.mean(dim=[0, 1], keepdim=True)
-    qpos_std  = all_qpos_data.std(dim=[0, 1], keepdim=True)
+    qpos_mean = all_qpos_data.mean(dim=[0, 1], keepdim=True)      # (1,1,6)
+    qpos_std  = all_qpos_data.std(dim=[0, 1], keepdim=True)       # (1,1,6)
     qpos_std  = torch.clip(qpos_std, 1e-2, np.inf)
 
     stats = {
-        "action_mean": action_mean.numpy().squeeze(),  # (6,)
-        "action_std":  action_std.numpy().squeeze(),   # (6,)
+        "action_mean": action_mean.numpy().squeeze(),  # (9,)
+        "action_std":  action_std.numpy().squeeze(),   # (9,)
         "qpos_mean":   qpos_mean.numpy().squeeze(),    # (6,)
         "qpos_std":    qpos_std.numpy().squeeze(),     # (6,)
         "example_qpos": all_qpos_data[0].numpy(),      # 첫 에피소드 예시
